@@ -2,6 +2,7 @@
 plugins {
     alias(libs.plugins.android.application) apply false
     alias(libs.plugins.kotlin.compose) apply false
+    alias(libs.plugins.gradle.ktlint) version(libs.versions.ktlint) apply false
 }
 
 tasks.register<Copy>("installGitHook") {
