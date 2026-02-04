@@ -41,7 +41,7 @@ class AndroidFileStore(
         return digest.joinToString("") { "%02x".format(it) }
     }
 
-    override fun detectMimeType(file: File): String? {
+    override fun detectMimeType(file: File): String {
         val tika = Tika()
         return tika.detect(file)
     }

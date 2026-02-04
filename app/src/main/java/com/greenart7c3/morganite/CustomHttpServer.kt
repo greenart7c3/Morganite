@@ -143,9 +143,7 @@ class CustomHttpServer(
                         if (file != null && file.exists()) {
                             val mimeType = fileStore.detectMimeType(file)
                             call.respondFile(file) {
-                                mimeType?.let {
-                                    call.response.header(HttpHeaders.ContentType, mimeType)
-                                }
+                                call.response.header(HttpHeaders.ContentType, mimeType)
                                 call.response.header(HttpHeaders.AcceptRanges, "bytes")
                                 call.response.header(HttpHeaders.ETag, hash)
                             }
@@ -200,9 +198,7 @@ class CustomHttpServer(
                         val mimeType = fileStore.detectMimeType(file)
 
                         call.response.status(HttpStatusCode.OK)
-                        mimeType?.let {
-                            call.response.header(HttpHeaders.ContentType, mimeType)
-                        }
+                        call.response.header(HttpHeaders.ContentType, mimeType)
                         call.response.header(HttpHeaders.AcceptRanges, "bytes")
                         call.response.header(HttpHeaders.ContentLength, file.length())
                         call.response.header(HttpHeaders.ETag, hash)

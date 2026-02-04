@@ -5,5 +5,5 @@ import java.io.File
 interface FileStore {
     fun getFileByHash(hash: String): File?
     fun saveBlob(bytes: ByteArray): String
-    fun detectMimeType(file: File): String?
+    fun detectMimeType(file: File): String
 }
