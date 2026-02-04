@@ -83,7 +83,7 @@ class CustomHttpServer(
     fun fetchAuthorServers(pubkey: String): List<String> {
         // Fetch BUD-03 server list (kind:10063) for this author
         // Return a list of server domains/URLs
-        return listOf() // implement your lookup
+        return listOf() // TODO: implement lookup
     }
 
     fun detectMimeType(bytes: ByteArray): String {
