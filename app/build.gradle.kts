@@ -56,6 +56,7 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation(libs.ktor.server.cio)
     implementation(libs.ktor.server.core)
+    implementation(libs.ktor.server.partialcontent)
     implementation(libs.okhttp)
     implementation(libs.tika.core)
     implementation(libs.quartz)

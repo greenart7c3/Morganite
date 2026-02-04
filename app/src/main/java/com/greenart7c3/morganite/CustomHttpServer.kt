@@ -18,10 +18,12 @@ import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationStarted
 import io.ktor.server.application.ApplicationStopped
+import io.ktor.server.application.install
 import io.ktor.server.cio.CIO
 import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.partialcontent.PartialContent
 import io.ktor.server.request.path
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
@@ -190,6 +192,8 @@ class CustomHttpServer(
             monitor.subscribe(ApplicationStopped) {
                 Log.d(Morganite.TAG, "Server stopped")
             }
+
+            install(PartialContent)
 
             routing {
                 route("/") {
