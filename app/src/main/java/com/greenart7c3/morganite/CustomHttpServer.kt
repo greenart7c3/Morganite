@@ -3,6 +3,7 @@ package com.greenart7c3.morganite
 import android.util.Log
 import com.greenart7c3.morganite.service.FileStore
 import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationStarted
 import io.ktor.server.application.ApplicationStopped
@@ -11,6 +12,7 @@ import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.path
+import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondFile
@@ -34,6 +36,11 @@ class CustomHttpServer(
 
     fun stop() {
         server.stop()
+    }
+
+    fun extractHash(path: String): String? {
+        val regex = Regex("""/([0-9a-f]{64})(?:\.[^/]+)?$""")
+        return regex.find(path)?.groupValues?.get(1)
     }
 
     @OptIn(DelicateCoroutinesApi::class, ExperimentalCoroutinesApi::class)
@@ -86,10 +93,35 @@ class CustomHttpServer(
                         file = file,
                         configure = {
                             call.response.status(HttpStatusCode.OK)
-                            call.response.headers.append("Content-Type", mimeType)
+                            call.response.headers.append(HttpHeaders.ContentType, mimeType)
+                            call.response.headers.append(HttpHeaders.AcceptRanges, "bytes")
+                            call.response.headers.append(HttpHeaders.ETag, hash)
                         },
                     )
                 }
+
+                head("/{path...}") {
+                    val hash = extractHash(call.request.path()) ?: run {
+                        call.respond(HttpStatusCode.BadRequest)
+                        return@head
+                    }
+
+                    val file = fileStore.getFileByHash(hash) ?: run {
+                        call.respond(HttpStatusCode.NotFound)
+                        return@head
+                    }
+
+                    val mimeType = fileStore.detectMimeType(file)
+
+                    call.response.status(HttpStatusCode.OK)
+                    mimeType?.let {
+                        call.response.header(HttpHeaders.ContentType, mimeType)
+                    }
+                    call.response.header(HttpHeaders.AcceptRanges, "bytes")
+                    call.response.header(HttpHeaders.ContentLength, file.length())
+                    call.response.header(HttpHeaders.ETag, hash)
+                }
+
             }
         }
     }
