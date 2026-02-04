@@ -12,7 +12,7 @@ android {
 
     defaultConfig {
         applicationId = "com.greenart7c3.morganite"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 36
         versionCode = 1
         versionName = "0.0.1"
@@ -58,4 +58,5 @@ dependencies {
     implementation(libs.ktor.server.core)
     implementation(libs.okhttp)
     implementation(libs.tika.core)
+    implementation(libs.quartz)
 }

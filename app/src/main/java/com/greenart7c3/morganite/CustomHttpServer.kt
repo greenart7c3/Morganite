@@ -2,6 +2,16 @@ package com.greenart7c3.morganite
 
 import android.util.Log
 import com.greenart7c3.morganite.service.FileStore
+import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
+import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.downloadFirstEvent
+import com.vitorpamplona.quartz.nip01Core.relay.client.listeners.IRelayClientListener
+import com.vitorpamplona.quartz.nip01Core.relay.client.single.IRelayClient
+import com.vitorpamplona.quartz.nip01Core.relay.commands.toClient.Message
+import com.vitorpamplona.quartz.nip01Core.relay.commands.toRelay.Command
+import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
+import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
+import com.vitorpamplona.quartz.nip01Core.relay.sockets.okhttp.BasicOkHttpWebSocket
+import com.vitorpamplona.quartz.nipB7Blossom.BlossomServersEvent
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
@@ -33,11 +43,52 @@ import java.io.File
 import java.net.URLConnection
 import java.security.MessageDigest
 
+class NostrClientLoggerListener() : IRelayClientListener {
+    override fun onCannotConnect(relay: IRelayClient, errorMessage: String) {
+        Log.d(Morganite.TAG, "onCannotConnect")
+        super.onCannotConnect(relay, errorMessage)
+    }
+
+    override fun onSent(relay: IRelayClient, cmdStr: String, cmd: Command, success: Boolean) {
+        Log.d(Morganite.TAG, "onSent $cmdStr $success")
+
+        super.onSent(relay, cmdStr, cmd, success)
+    }
+
+    override fun onIncomingMessage(relay: IRelayClient, msgStr: String, msg: Message) {
+        Log.d(Morganite.TAG, "onIncomingMessage $msgStr")
+
+        super.onIncomingMessage(relay, msgStr, msg)
+    }
+
+    override fun onDisconnected(relay: IRelayClient) {
+        Log.d(Morganite.TAG, "onDisconnected")
+        super.onDisconnected(relay)
+    }
+
+    override fun onConnecting(relay: IRelayClient) {
+        Log.d(Morganite.TAG, "onConnecting")
+        super.onConnecting(relay)
+    }
+
+    override fun onConnected(relay: IRelayClient, pingMillis: Int, compressed: Boolean) {
+        Log.d(Morganite.TAG, "onConnected")
+        super.onConnected(relay, pingMillis, compressed)
+    }
+}
+
 class CustomHttpServer(
     val fileStore: FileStore,
 ) {
     lateinit var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>
     val httpClient = OkHttpClient()
+    val rootClient = OkHttpClient.Builder().build()
+    val socketBuilder = BasicOkHttpWebSocket.Builder { _ -> rootClient }
+    val nostrClient = NostrClient(socketBuilder)
+
+    val listener = NostrClientLoggerListener().also {
+        nostrClient.subscribe(it)
+    }
 
     fun start() {
         server = startKtorHttpServer()
@@ -59,34 +110,20 @@ class CustomHttpServer(
         return "$s/$hash$extension"
     }
 
-    fun tryFetchBlob(url: String, expectedSize: Long? = null): ByteArray? {
-        return try {
-            val request = Request.Builder()
-                .url(url)
-                .get()
-                .build()
+    suspend fun fetchAuthorServers(pubkey: String): List<String> {
+        val event = nostrClient.downloadFirstEvent(
+            filters = mapOf(
+                NormalizedRelayUrl("wss://purplepag.es") to listOf(
+                    Filter(
+                        kinds = listOf(BlossomServersEvent.KIND),
+                        authors = listOf(pubkey),
+                        limit = 1,
+                    )
+                )
+            )
+        )
 
-            httpClient.newCall(request).execute().use { response ->
-                if (!response.isSuccessful) return null
-
-                val body = response.body ?: return null
-                val bytes = body.bytes()
-
-                if (expectedSize != null && bytes.size.toLong() != expectedSize) {
-                    return null
-                }
-                bytes
-            }
-        } catch (_: Exception) {
-            null
-        }
-    }
-
-
-    fun fetchAuthorServers(pubkey: String): List<String> {
-        // Fetch BUD-03 server list (kind:10063) for this author
-        // Return a list of server domains/URLs
-        return listOf() // TODO: implement lookup
+        return (event as? BlossomServersEvent)?.servers() ?: emptyList()
     }
 
     @OptIn(DelicateCoroutinesApi::class, ExperimentalCoroutinesApi::class)
