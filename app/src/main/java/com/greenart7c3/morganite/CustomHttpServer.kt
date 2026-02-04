@@ -15,6 +15,7 @@ import com.vitorpamplona.quartz.nipB7Blossom.BlossomServersEvent
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationStarted
 import io.ktor.server.application.ApplicationStopped
 import io.ktor.server.cio.CIO
@@ -24,7 +25,6 @@ import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.path
 import io.ktor.server.response.header
 import io.ktor.server.response.respond
-import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondFile
 import io.ktor.server.response.respondOutputStream
 import io.ktor.server.response.respondText
@@ -37,10 +37,7 @@ import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.apache.tika.Tika
-import java.io.ByteArrayInputStream
 import java.io.File
-import java.net.URLConnection
 import java.security.MessageDigest
 
 class NostrClientLoggerListener() : IRelayClientListener {
@@ -113,7 +110,7 @@ class CustomHttpServer(
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
         val event = nostrClient.downloadFirstEvent(
             filters = mapOf(
-                NormalizedRelayUrl("wss://purplepag.es") to listOf(
+                NormalizedRelayUrl("wss://nostr.land") to listOf(
                     Filter(
                         kinds = listOf(BlossomServersEvent.KIND),
                         authors = listOf(pubkey),
@@ -124,6 +121,59 @@ class CustomHttpServer(
         )
 
         return (event as? BlossomServersEvent)?.servers() ?: emptyList()
+    }
+
+    private suspend fun tryFetchAndStream(
+        server: String,
+        hash: String,
+        extension: String,
+        call: ApplicationCall,
+    ): Boolean {
+        val url = buildUrl(server, hash, extension)
+
+        return try {
+            httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                if (!response.isSuccessful) return false // Try next server
+
+                val body = response.body ?: return false
+                val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
+                    ?: ContentType.Application.OctetStream
+
+                val tempFile = File.createTempFile("download-", ".tmp")
+                val digest = MessageDigest.getInstance("SHA-256")
+
+                try {
+                    // Ktor streaming
+                    call.respondOutputStream(contentType, HttpStatusCode.OK) {
+                        body.byteStream().use { inputStream ->
+                            tempFile.outputStream().use { fileOut ->
+                                val buffer = ByteArray(8192)
+                                var bytesRead: Int
+                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                    digest.update(buffer, 0, bytesRead)
+                                    fileOut.write(buffer, 0, bytesRead)
+                                    this.write(buffer, 0, bytesRead)
+                                }
+                            }
+                        }
+                    }
+
+                    // Finalize
+                    fileStore.saveBlob(tempFile.readBytes())
+                    true // Signal SUCCESS to the loop
+                } catch (e: Exception) {
+                    if (tempFile.exists()) tempFile.delete()
+
+                    // If the user (the client) disconnected, throw to stop everything
+                    if (e is java.io.IOException && e.message?.contains("Broken pipe") == true) {
+                        throw e
+                    }
+                    false // Server error mid-stream, return false to try next server
+                }
+            }
+        } catch (e: Exception) {
+            false // Connection error, return false to try next server
+        }
     }
 
     @OptIn(DelicateCoroutinesApi::class, ExperimentalCoroutinesApi::class)
@@ -191,92 +241,17 @@ class CustomHttpServer(
 
                         // Attempt retrieval from xs hints
                         for (server in xsServers) {
-                            val url = buildUrl(server, hash, extension)
-                            httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
-                                if (!response.isSuccessful) return@get call.respond(HttpStatusCode.fromValue(response.code))
-
-                                val body = response.body ?: return@get call.respond(HttpStatusCode.NoContent)
-                                val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
-                                    ?: ContentType.Application.OctetStream
-
-                                val tempFile = File.createTempFile("download-", ".tmp")
-                                val digest = MessageDigest.getInstance("SHA-256")
-
-                                try {
-                                    call.respondOutputStream(contentType, HttpStatusCode.OK) {
-                                        body.byteStream().use { inputStream ->
-                                            tempFile.outputStream().use { fileOut ->
-                                                val buffer = ByteArray(8192)
-                                                var bytesRead: Int
-
-                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                                                    // 1. Update Hash
-                                                    digest.update(buffer, 0, bytesRead)
-                                                    // 2. Write to Temp File
-                                                    fileOut.write(buffer, 0, bytesRead)
-                                                    // 3. Stream to User
-                                                    this.write(buffer, 0, bytesRead)
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // Finalize the hash
-                                    val checksum = digest.digest().joinToString("") { "%02x".format(it) }
-                                    println("File verified. SHA-256: $checksum")
-
-                                    fileStore.saveBlob(tempFile.readBytes())
-                                } catch (e: Exception) {
-                                    if (tempFile.exists()) tempFile.delete()
-                                    throw e
-                                }
-                            }
+                            val success = tryFetchAndStream(server, hash, extension, call)
+                            if (success) return@get // Exit the route on first success
                         }
 
                         // Attempt retrieval from author server lists
                         for (pubkey in authorPubkeys) {
                             val servers = fetchAuthorServers(pubkey) // BUD-03 kind:10063
+                            // Label the loop so we can jump to the next iteration from deep inside
                             for (server in servers) {
-                                val url = buildUrl(server, hash, extension)
-                                httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
-                                    if (!response.isSuccessful) return@get call.respond(HttpStatusCode.fromValue(response.code))
-
-                                    val body = response.body ?: return@get call.respond(HttpStatusCode.NoContent)
-                                    val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
-                                        ?: ContentType.Application.OctetStream
-
-                                    val tempFile = File.createTempFile("download-", ".tmp")
-                                    val digest = MessageDigest.getInstance("SHA-256")
-
-                                    try {
-                                        call.respondOutputStream(contentType, HttpStatusCode.OK) {
-                                            body.byteStream().use { inputStream ->
-                                                tempFile.outputStream().use { fileOut ->
-                                                    val buffer = ByteArray(8192)
-                                                    var bytesRead: Int
-
-                                                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                                                        // 1. Update Hash
-                                                        digest.update(buffer, 0, bytesRead)
-                                                        // 2. Write to Temp File
-                                                        fileOut.write(buffer, 0, bytesRead)
-                                                        // 3. Stream to User
-                                                        this.write(buffer, 0, bytesRead)
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        // Finalize the hash
-                                        val checksum = digest.digest().joinToString("") { "%02x".format(it) }
-                                        println("File verified. SHA-256: $checksum")
-
-                                        fileStore.saveBlob(tempFile.readBytes())
-                                    } catch (e: Exception) {
-                                        if (tempFile.exists()) tempFile.delete()
-                                        throw e
-                                    }
-                                }
+                                val success = tryFetchAndStream(server, hash, extension, call)
+                                if (success) return@get // Exit the route on first success
                             }
                         }
 
