@@ -31,6 +31,7 @@ import org.apache.tika.Tika
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.URLConnection
+import java.security.MessageDigest
 
 class CustomHttpServer(
     val fileStore: FileStore,
@@ -86,11 +87,6 @@ class CustomHttpServer(
         // Fetch BUD-03 server list (kind:10063) for this author
         // Return a list of server domains/URLs
         return listOf() // TODO: implement lookup
-    }
-
-    fun detectMimeType(bytes: ByteArray): String {
-        val tika = Tika()
-        return tika.detect(bytes)
     }
 
     @OptIn(DelicateCoroutinesApi::class, ExperimentalCoroutinesApi::class)
@@ -166,29 +162,36 @@ class CustomHttpServer(
                                 val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
                                     ?: ContentType.Application.OctetStream
 
-                                // Create a temp file to hold data during the stream
                                 val tempFile = File.createTempFile("download-", ".tmp")
+                                val digest = MessageDigest.getInstance("SHA-256")
 
                                 try {
                                     call.respondOutputStream(contentType, HttpStatusCode.OK) {
-                                        val inputStream = body.byteStream()
-                                        tempFile.outputStream().use { fileOut ->
-                                            val buffer = ByteArray(8192)
-                                            var bytesRead: Int
+                                        body.byteStream().use { inputStream ->
+                                            tempFile.outputStream().use { fileOut ->
+                                                val buffer = ByteArray(8192)
+                                                var bytesRead: Int
 
-                                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                                                // 1. Write to the local temp file
-                                                fileOut.write(buffer, 0, bytesRead)
-                                                // 2. Write to the HTTP response (the user)
-                                                this.write(buffer, 0, bytesRead)
+                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                    // 1. Update Hash
+                                                    digest.update(buffer, 0, bytesRead)
+                                                    // 2. Write to Temp File
+                                                    fileOut.write(buffer, 0, bytesRead)
+                                                    // 3. Stream to User
+                                                    this.write(buffer, 0, bytesRead)
+                                                }
                                             }
                                         }
                                     }
 
-                                   fileStore.saveBlob(tempFile.readBytes())
+                                    // Finalize the hash
+                                    val checksum = digest.digest().joinToString("") { "%02x".format(it) }
+                                    println("File verified. SHA-256: $checksum")
+
+                                    fileStore.saveBlob(tempFile.readBytes())
                                 } catch (e: Exception) {
                                     if (tempFile.exists()) tempFile.delete()
-                                    throw e // Let Ktor handle the disconnection
+                                    throw e
                                 }
                             }
                         }
@@ -205,29 +208,36 @@ class CustomHttpServer(
                                     val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
                                         ?: ContentType.Application.OctetStream
 
-                                    // Create a temp file to hold data during the stream
                                     val tempFile = File.createTempFile("download-", ".tmp")
+                                    val digest = MessageDigest.getInstance("SHA-256")
 
                                     try {
                                         call.respondOutputStream(contentType, HttpStatusCode.OK) {
-                                            val inputStream = body.byteStream()
-                                            tempFile.outputStream().use { fileOut ->
-                                                val buffer = ByteArray(8192)
-                                                var bytesRead: Int
+                                            body.byteStream().use { inputStream ->
+                                                tempFile.outputStream().use { fileOut ->
+                                                    val buffer = ByteArray(8192)
+                                                    var bytesRead: Int
 
-                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                                                    // 1. Write to the local temp file
-                                                    fileOut.write(buffer, 0, bytesRead)
-                                                    // 2. Write to the HTTP response (the user)
-                                                    this.write(buffer, 0, bytesRead)
+                                                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                        // 1. Update Hash
+                                                        digest.update(buffer, 0, bytesRead)
+                                                        // 2. Write to Temp File
+                                                        fileOut.write(buffer, 0, bytesRead)
+                                                        // 3. Stream to User
+                                                        this.write(buffer, 0, bytesRead)
+                                                    }
                                                 }
                                             }
                                         }
 
+                                        // Finalize the hash
+                                        val checksum = digest.digest().joinToString("") { "%02x".format(it) }
+                                        println("File verified. SHA-256: $checksum")
+
                                         fileStore.saveBlob(tempFile.readBytes())
                                     } catch (e: Exception) {
                                         if (tempFile.exists()) tempFile.delete()
-                                        throw e // Let Ktor handle the disconnection
+                                        throw e
                                     }
                                 }
                             }
