@@ -3,7 +3,10 @@ package com.greenart7c3.morganite.service
 import android.content.Context
 import org.apache.tika.Tika
 import java.io.File
+import java.io.IOException
 import java.net.URLConnection
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
 
 class AndroidFileStore(
@@ -11,11 +14,9 @@ class AndroidFileStore(
 ) : FileStore {
 
     private val blobDir = File(context.filesDir, "blobs")
-    private val mimeDir = File(blobDir, "mime")
 
     init {
         blobDir.mkdirs()
-        mimeDir.mkdirs()
     }
 
     override fun getFileByHash(hash: String): File? {
@@ -34,6 +35,21 @@ class AndroidFileStore(
         }
 
         return hash
+    }
+
+    override fun moveFile(tempFile: File, hash: String) {
+        try {
+            // ATOMIC_MOVE is faster but might fail if moving across different drives
+            Files.move(
+                tempFile.toPath(),
+                File(blobDir, hash).toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (e: IOException) {
+            // Fallback: If move fails, ensure we clean up the temp file
+            if (tempFile.exists()) tempFile.delete()
+            throw e
+        }
     }
 
     private fun sha256(bytes: ByteArray): String {

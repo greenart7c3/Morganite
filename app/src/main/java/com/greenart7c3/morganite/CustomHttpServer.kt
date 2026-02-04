@@ -159,7 +159,7 @@ class CustomHttpServer(
                     }
 
                     // Finalize
-                    fileStore.saveBlob(tempFile.readBytes())
+                    fileStore.moveFile(tempFile, hash)
                     true // Signal SUCCESS to the loop
                 } catch (e: Exception) {
                     if (tempFile.exists()) tempFile.delete()
