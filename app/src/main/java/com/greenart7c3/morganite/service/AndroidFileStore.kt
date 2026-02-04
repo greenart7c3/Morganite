@@ -1,6 +1,7 @@
 package com.greenart7c3.morganite.service
 
 import android.content.Context
+import org.apache.tika.Tika
 import java.io.File
 import java.net.URLConnection
 import java.security.MessageDigest
@@ -41,9 +42,8 @@ class AndroidFileStore(
     }
 
     override fun detectMimeType(file: File): String? {
-        file.inputStream().use { input ->
-            return URLConnection.guessContentTypeFromStream(input)
-        }
+        val tika = Tika()
+        return tika.detect(file)
     }
 }
 

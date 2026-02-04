@@ -57,4 +57,5 @@ dependencies {
     implementation(libs.ktor.server.cio)
     implementation(libs.ktor.server.core)
     implementation(libs.okhttp)
+    implementation(libs.tika.core)
 }

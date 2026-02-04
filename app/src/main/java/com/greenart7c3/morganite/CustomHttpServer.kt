@@ -26,6 +26,7 @@ import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.apache.tika.Tika
 import java.io.ByteArrayInputStream
 import java.net.URLConnection
 
@@ -85,10 +86,9 @@ class CustomHttpServer(
         return listOf() // implement your lookup
     }
 
-    fun detectMimeType(bytes: ByteArray): String? {
-        ByteArrayInputStream(bytes).use { input ->
-            return URLConnection.guessContentTypeFromStream(input)
-        }
+    fun detectMimeType(bytes: ByteArray): String {
+        val tika = Tika()
+        return tika.detect(bytes)
     }
 
     @OptIn(DelicateCoroutinesApi::class, ExperimentalCoroutinesApi::class)
@@ -162,7 +162,7 @@ class CustomHttpServer(
                             val blob = tryFetchBlob(url) // implement HTTP GET + size verification if sz present
                             if (blob != null) {
                                 fileStore.saveBlob(blob)
-                                val mimeType = detectMimeType(blob) ?: "application/octet-stream"
+                                val mimeType = detectMimeType(blob)
                                 call.respondBytes(blob, ContentType.parse(mimeType))
                                 return@get
                             }
@@ -176,7 +176,7 @@ class CustomHttpServer(
                                 val blob = tryFetchBlob(url)
                                 if (blob != null) {
                                     fileStore.saveBlob(blob)
-                                    val mimeType = detectMimeType(blob) ?: "application/octet-stream"
+                                    val mimeType = detectMimeType(blob)
                                     call.respondBytes(blob, ContentType.parse(mimeType))
                                     return@get
                                 }
