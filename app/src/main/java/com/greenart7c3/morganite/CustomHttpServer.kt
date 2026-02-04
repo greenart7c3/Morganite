@@ -16,6 +16,7 @@ import io.ktor.server.response.header
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytes
 import io.ktor.server.response.respondFile
+import io.ktor.server.response.respondOutputStream
 import io.ktor.server.response.respondText
 import io.ktor.server.routing.get
 import io.ktor.server.routing.head
@@ -28,6 +29,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.apache.tika.Tika
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.net.URLConnection
 
 class CustomHttpServer(
@@ -157,12 +159,37 @@ class CustomHttpServer(
                         // Attempt retrieval from xs hints
                         for (server in xsServers) {
                             val url = buildUrl(server, hash, extension)
-                            val blob = tryFetchBlob(url) // implement HTTP GET + size verification if sz present
-                            if (blob != null) {
-                                fileStore.saveBlob(blob)
-                                val mimeType = detectMimeType(blob)
-                                call.respondBytes(blob, ContentType.parse(mimeType))
-                                return@get
+                            httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                                if (!response.isSuccessful) return@get call.respond(HttpStatusCode.fromValue(response.code))
+
+                                val body = response.body ?: return@get call.respond(HttpStatusCode.NoContent)
+                                val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
+                                    ?: ContentType.Application.OctetStream
+
+                                // Create a temp file to hold data during the stream
+                                val tempFile = File.createTempFile("download-", ".tmp")
+
+                                try {
+                                    call.respondOutputStream(contentType, HttpStatusCode.OK) {
+                                        val inputStream = body.byteStream()
+                                        tempFile.outputStream().use { fileOut ->
+                                            val buffer = ByteArray(8192)
+                                            var bytesRead: Int
+
+                                            while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                // 1. Write to the local temp file
+                                                fileOut.write(buffer, 0, bytesRead)
+                                                // 2. Write to the HTTP response (the user)
+                                                this.write(buffer, 0, bytesRead)
+                                            }
+                                        }
+                                    }
+
+                                   fileStore.saveBlob(tempFile.readBytes())
+                                } catch (e: Exception) {
+                                    if (tempFile.exists()) tempFile.delete()
+                                    throw e // Let Ktor handle the disconnection
+                                }
                             }
                         }
 
@@ -171,12 +198,37 @@ class CustomHttpServer(
                             val servers = fetchAuthorServers(pubkey) // BUD-03 kind:10063
                             for (server in servers) {
                                 val url = buildUrl(server, hash, extension)
-                                val blob = tryFetchBlob(url)
-                                if (blob != null) {
-                                    fileStore.saveBlob(blob)
-                                    val mimeType = detectMimeType(blob)
-                                    call.respondBytes(blob, ContentType.parse(mimeType))
-                                    return@get
+                                httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                                    if (!response.isSuccessful) return@get call.respond(HttpStatusCode.fromValue(response.code))
+
+                                    val body = response.body ?: return@get call.respond(HttpStatusCode.NoContent)
+                                    val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
+                                        ?: ContentType.Application.OctetStream
+
+                                    // Create a temp file to hold data during the stream
+                                    val tempFile = File.createTempFile("download-", ".tmp")
+
+                                    try {
+                                        call.respondOutputStream(contentType, HttpStatusCode.OK) {
+                                            val inputStream = body.byteStream()
+                                            tempFile.outputStream().use { fileOut ->
+                                                val buffer = ByteArray(8192)
+                                                var bytesRead: Int
+
+                                                while (inputStream.read(buffer).also { bytesRead = it } != -1) {
+                                                    // 1. Write to the local temp file
+                                                    fileOut.write(buffer, 0, bytesRead)
+                                                    // 2. Write to the HTTP response (the user)
+                                                    this.write(buffer, 0, bytesRead)
+                                                }
+                                            }
+                                        }
+
+                                        fileStore.saveBlob(tempFile.readBytes())
+                                    } catch (e: Exception) {
+                                        if (tempFile.exists()) tempFile.delete()
+                                        throw e // Let Ktor handle the disconnection
+                                    }
                                 }
                             }
                         }
