@@ -56,4 +56,5 @@ dependencies {
     debugImplementation(libs.androidx.compose.ui.test.manifest)
     implementation(libs.ktor.server.cio)
     implementation(libs.ktor.server.core)
+    implementation(libs.okhttp)
 }
