@@ -61,6 +61,10 @@ class AndroidFileStore(
         val tika = Tika()
         return tika.detect(file)
     }
+
+    override fun getSize(): Long {
+        return blobDir.length()
+    }
 }
 
 

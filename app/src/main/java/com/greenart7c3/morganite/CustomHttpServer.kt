@@ -39,6 +39,8 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
@@ -81,6 +83,8 @@ class NostrClientLoggerListener() : IRelayClientListener {
 class CustomHttpServer(
     val fileStore: FileStore,
 ) {
+    val isRunning = MutableStateFlow(false)
+
     lateinit var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>
     val httpClient = OkHttpClient()
     val rootClient = OkHttpClient.Builder().build()
@@ -91,13 +95,19 @@ class CustomHttpServer(
         nostrClient.subscribe(it)
     }
 
-    fun start() {
+    suspend fun start() {
+        if (::server.isInitialized) {
+            Log.d(Morganite.TAG, "Server already initialized. Starting")
+            server.startSuspend()
+            return
+        }
         server = startKtorHttpServer()
-        server.start()
+        startMonitoring()
+        server.startSuspend()
     }
 
-    fun stop() {
-        server.stop()
+    suspend fun stop() {
+        server.stopSuspend()
     }
 
     fun extractHash(path: String): String? {
@@ -180,6 +190,18 @@ class CustomHttpServer(
         }
     }
 
+    fun startMonitoring() {
+        server.application.monitor.subscribe(ApplicationStarted) {
+            isRunning.value = true
+            Log.d(Morganite.TAG, "Server started")
+        }
+
+        server.application.monitor.subscribe(ApplicationStopped) {
+            isRunning.value = false
+            Log.d(Morganite.TAG, "Server stopped")
+        }
+    }
+
     @OptIn(DelicateCoroutinesApi::class, ExperimentalCoroutinesApi::class)
     private fun startKtorHttpServer(host: String = "0.0.0.0", port: Int = 24242): EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration> {
         return embeddedServer(
@@ -187,14 +209,6 @@ class CustomHttpServer(
             port = port,
             host = host,
         ) {
-            monitor.subscribe(ApplicationStarted) {
-                Log.d(Morganite.TAG, "Server started on $host:$port")
-            }
-
-            monitor.subscribe(ApplicationStopped) {
-                Log.d(Morganite.TAG, "Server stopped")
-            }
-
             install(PartialContent)
             install(CachingHeaders)
 
