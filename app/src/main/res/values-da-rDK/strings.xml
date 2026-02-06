@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Morganite</string>
+    <string name="app_name_debug">Morganite Debug</string>
+    <string name="stop">Stop</string>
+    <string name="start">Start</string>
+    <string name="storage_used_mb">Storage used: %1$s MB</string>
+</resources>
