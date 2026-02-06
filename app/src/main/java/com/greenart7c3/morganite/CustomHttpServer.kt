@@ -86,7 +86,6 @@ class CustomHttpServer(
     val isRunning = MutableStateFlow(false)
 
     lateinit var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>
-    val httpClient = OkHttpClient()
     val rootClient = OkHttpClient.Builder().build()
     val socketBuilder = BasicOkHttpWebSocket.Builder { _ -> rootClient }
     val nostrClient = NostrClient(socketBuilder)
@@ -146,7 +145,7 @@ class CustomHttpServer(
         val url = buildUrl(server, hash, extension)
 
         return try {
-            httpClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            rootClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) return false // Try next server
 
                 val body = response.body ?: return false
