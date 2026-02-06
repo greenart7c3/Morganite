@@ -23,7 +23,9 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.cio.CIOApplicationEngine
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
+import io.ktor.server.plugins.cachingheaders.CachingHeaders
 import io.ktor.server.plugins.partialcontent.PartialContent
+import io.ktor.server.request.header
 import io.ktor.server.request.path
 import io.ktor.server.response.appendIfAbsent
 import io.ktor.server.response.respond
@@ -194,6 +196,7 @@ class CustomHttpServer(
             }
 
             install(PartialContent)
+            install(CachingHeaders)
 
             routing {
                 route("/") {
@@ -230,10 +233,17 @@ class CustomHttpServer(
                         // Check if blob exists locally
                         val file = fileStore.getFileByHash(hash)
                         if (file != null && file.exists()) {
+                            val clientETag = call.request.header(HttpHeaders.IfNoneMatch)
+                            val hashETag = "\"$hash\""
+
+                            if (clientETag == hashETag) {
+                                call.respond(HttpStatusCode.NotModified)
+                                return@get
+                            }
+
                             val mimeType = fileStore.detectMimeType(file)
                             call.respondFile(file) {
                                 call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
-                                call.response.headers.appendIfAbsent(HttpHeaders.AcceptRanges, "bytes")
                                 call.response.headers.appendIfAbsent(HttpHeaders.ETag, hash)
                             }
                             return@get
@@ -277,7 +287,6 @@ class CustomHttpServer(
 
                         call.response.status(HttpStatusCode.OK)
                         call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
-                        call.response.headers.appendIfAbsent(HttpHeaders.AcceptRanges, "bytes")
                         call.response.headers.appendIfAbsent(HttpHeaders.ContentLength, file.length().toString())
                         call.response.headers.appendIfAbsent(HttpHeaders.ETag, hash)
                     }

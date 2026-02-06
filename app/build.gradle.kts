@@ -57,6 +57,8 @@ dependencies {
     implementation(libs.ktor.server.cio)
     implementation(libs.ktor.server.core)
     implementation(libs.ktor.server.partialcontent)
+    implementation(libs.ktor.server.caching.headers)
+    implementation(libs.ktor.server.cors)
     implementation(libs.okhttp)
     implementation(libs.tika.core)
     implementation(libs.quartz)
