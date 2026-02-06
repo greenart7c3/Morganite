@@ -1,13 +1,12 @@
 package com.greenart7c3.morganite.service
 
 import android.content.Context
+import com.vitorpamplona.quartz.utils.sha256.pool
 import org.apache.tika.Tika
 import java.io.File
 import java.io.IOException
-import java.net.URLConnection
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
-import java.security.MessageDigest
 
 class AndroidFileStore(
     context: Context
@@ -53,7 +52,7 @@ class AndroidFileStore(
     }
 
     private fun sha256(bytes: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(bytes)
+        val digest = pool.hash(bytes)
         return digest.joinToString("") { "%02x".format(it) }
     }
 
