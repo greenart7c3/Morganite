@@ -25,7 +25,7 @@ import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.plugins.partialcontent.PartialContent
 import io.ktor.server.request.path
-import io.ktor.server.response.header
+import io.ktor.server.response.appendIfAbsent
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondFile
 import io.ktor.server.response.respondOutputStream
@@ -198,10 +198,10 @@ class CustomHttpServer(
             routing {
                 route("/") {
                     options {
-                        call.response.header("Access-Control-Allow-Origin", "*")
-                        call.response.header("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE")
-                        call.response.header("Access-Control-Allow-Headers", "*")
-                        call.response.header("Access-Control-Max-Age", "86400")
+                        call.response.headers.appendIfAbsent("Access-Control-Allow-Origin", "*")
+                        call.response.headers.appendIfAbsent("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE")
+                        call.response.headers.appendIfAbsent("Access-Control-Allow-Headers", "*")
+                        call.response.headers.appendIfAbsent("Access-Control-Max-Age", "86400")
                         call.respond(HttpStatusCode.OK)
                     }
 
@@ -212,10 +212,10 @@ class CustomHttpServer(
 
                 route("/{path...}") {
                     options {
-                        call.response.header("Access-Control-Allow-Origin", "*")
-                        call.response.header("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE")
-                        call.response.header("Access-Control-Allow-Headers", "*")
-                        call.response.header("Access-Control-Max-Age", "86400")
+                        call.response.headers.appendIfAbsent("Access-Control-Allow-Origin", "*")
+                        call.response.headers.appendIfAbsent("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE")
+                        call.response.headers.appendIfAbsent("Access-Control-Allow-Headers", "*")
+                        call.response.headers.appendIfAbsent("Access-Control-Max-Age", "86400")
                         call.respond(HttpStatusCode.OK)
                     }
 
@@ -232,9 +232,9 @@ class CustomHttpServer(
                         if (file != null && file.exists()) {
                             val mimeType = fileStore.detectMimeType(file)
                             call.respondFile(file) {
-                                call.response.header(HttpHeaders.ContentType, mimeType)
-                                call.response.header(HttpHeaders.AcceptRanges, "bytes")
-                                call.response.header(HttpHeaders.ETag, hash)
+                                call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
+                                call.response.headers.appendIfAbsent(HttpHeaders.AcceptRanges, "bytes")
+                                call.response.headers.appendIfAbsent(HttpHeaders.ETag, hash)
                             }
                             return@get
                         }
@@ -276,10 +276,10 @@ class CustomHttpServer(
                         val mimeType = fileStore.detectMimeType(file)
 
                         call.response.status(HttpStatusCode.OK)
-                        call.response.header(HttpHeaders.ContentType, mimeType)
-                        call.response.header(HttpHeaders.AcceptRanges, "bytes")
-                        call.response.header(HttpHeaders.ContentLength, file.length())
-                        call.response.header(HttpHeaders.ETag, hash)
+                        call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
+                        call.response.headers.appendIfAbsent(HttpHeaders.AcceptRanges, "bytes")
+                        call.response.headers.appendIfAbsent(HttpHeaders.ContentLength, file.length().toString())
+                        call.response.headers.appendIfAbsent(HttpHeaders.ETag, hash)
                     }
                 }
             }
