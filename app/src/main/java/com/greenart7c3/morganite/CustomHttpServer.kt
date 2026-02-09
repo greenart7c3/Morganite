@@ -157,7 +157,7 @@ class CustomHttpServer(
 
                 try {
                     // Ktor streaming
-                    call.respondOutputStream(contentType, HttpStatusCode.OK) {
+                    call.respondOutputStream(contentType, HttpStatusCode.fromValue(response.code)) {
                         body.byteStream().use { inputStream ->
                             tempFile.outputStream().use { fileOut ->
                                 val buffer = ByteArray(8192)

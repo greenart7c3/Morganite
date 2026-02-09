@@ -20,7 +20,11 @@ class AndroidFileStore(
 
     override fun getFileByHash(hash: String): File? {
         val file = File(blobDir, hash)
-        return file.takeIf { it.exists() && it.isFile }
+        if (file.exists() && file.isFile) {
+            file.setLastModified(System.currentTimeMillis())
+            return file
+        }
+        return null
     }
 
     override fun saveBlob(
@@ -31,7 +35,11 @@ class AndroidFileStore(
 
         if (!file.exists()) {
             file.writeBytes(bytes)
+        } else {
+            file.setLastModified(System.currentTimeMillis())
         }
+
+        pruneIfNeeded()
 
         return hash
     }
@@ -44,6 +52,7 @@ class AndroidFileStore(
                 File(blobDir, hash).toPath(),
                 StandardCopyOption.REPLACE_EXISTING,
             )
+            pruneIfNeeded()
         } catch (e: IOException) {
             // Fallback: If move fails, ensure we clean up the temp file
             if (tempFile.exists()) tempFile.delete()
@@ -62,8 +71,24 @@ class AndroidFileStore(
     }
 
     override fun getSize(): Long {
-        return blobDir.length()
+        return blobDir.listFiles()?.sumOf { it.length() } ?: 0L
+    }
+
+    private fun pruneIfNeeded() {
+        val files = blobDir.listFiles() ?: return
+        val currentSize = files.sumOf { it.length() }
+        if (currentSize <= 1024L * 1024L * 1024L) return
+
+        val sortedFiles = files.sortedBy { it.lastModified() }
+        var remainingSize = currentSize
+        val targetSize = 850L * 1024L * 1024L
+
+        for (file in sortedFiles) {
+            if (remainingSize <= targetSize) break
+            val fileSize = file.length()
+            if (file.delete()) {
+                remainingSize -= fileSize
+            }
+        }
     }
 }
-
-
