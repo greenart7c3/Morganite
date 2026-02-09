@@ -40,7 +40,6 @@ import io.ktor.server.routing.routing
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.isActive
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
