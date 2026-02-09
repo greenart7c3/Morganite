@@ -155,6 +155,10 @@ class CustomHttpServer(
                 val tempFile = File.createTempFile("download-", ".tmp")
                 val digest = MessageDigest.getInstance("SHA-256")
 
+                response.headers.forEach { (name, value) ->
+                    call.response.headers.appendIfAbsent(name, value)
+                }
+
                 try {
                     // Ktor streaming
                     call.respondOutputStream(contentType, HttpStatusCode.fromValue(response.code)) {
