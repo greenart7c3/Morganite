@@ -99,12 +99,14 @@ class CustomHttpServer(
             server.startSuspend()
             return
         }
+        Log.d(Morganite.TAG, "Starting CustomHttpServer")
         server = startKtorHttpServer()
         startMonitoring()
         server.startSuspend()
     }
 
     suspend fun stop() {
+        Log.d(Morganite.TAG, "Stopping CustomHttpServer")
         server.stopSuspend()
     }
 
@@ -120,6 +122,7 @@ class CustomHttpServer(
     }
 
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
+        Log.d(Morganite.TAG, "Fetching author servers for $pubkey")
         val event = nostrClient.downloadFirstEvent(
             filters = mapOf(
                 NormalizedRelayUrl("wss://nostr.land") to listOf(
@@ -132,7 +135,9 @@ class CustomHttpServer(
             )
         )
 
-        return (event as? BlossomServersEvent)?.servers() ?: emptyList()
+        val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
+        Log.d(Morganite.TAG, "Found ${servers.size} servers for $pubkey")
+        return servers
     }
 
     private suspend fun tryFetchAndStream(
@@ -142,12 +147,19 @@ class CustomHttpServer(
         call: ApplicationCall,
     ): Boolean {
         val url = buildUrl(server, hash, extension)
+        Log.d(Morganite.TAG, "Attempting to fetch and stream from $url")
 
         return try {
             rootClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
-                if (!response.isSuccessful) return false // Try next server
+                if (!response.isSuccessful) {
+                    Log.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
+                    return false // Try next server
+                }
 
-                val body = response.body ?: return false
+                val body = response.body ?: run {
+                    Log.d(Morganite.TAG, "Fetch failed from $url: Empty body")
+                    return false
+                }
                 val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
                     ?: ContentType.Application.OctetStream
 
@@ -176,8 +188,10 @@ class CustomHttpServer(
 
                     // Finalize
                     fileStore.moveFile(tempFile, hash)
+                    Log.d(Morganite.TAG, "Successfully streamed and saved $hash from $url")
                     true // Signal SUCCESS to the loop
                 } catch (e: Exception) {
+                    Log.e(Morganite.TAG, "Error while streaming from $url", e)
                     if (tempFile.exists()) tempFile.delete()
 
                     // If the user (the client) disconnected, throw to stop everything
@@ -188,6 +202,7 @@ class CustomHttpServer(
                 }
             }
         } catch (e: Exception) {
+            Log.e(Morganite.TAG, "Network error fetching from $url", e)
             false // Connection error, return false to try next server
         }
     }
@@ -240,8 +255,12 @@ class CustomHttpServer(
 
                     get {
                         val path = call.request.path() // e.g., "/b1674...f553.pdf"
+                        Log.d(Morganite.TAG, "GET request: $path")
                         val regex = Regex("([0-9a-f]{64})(\\.[a-z0-9]+)?")
-                        val match = regex.find(path) ?: return@get call.respond(HttpStatusCode.BadRequest, "Invalid SHA-256 hash")
+                        val match = regex.find(path) ?: run {
+                            Log.d(Morganite.TAG, "Invalid SHA-256 hash in path: $path")
+                            return@get call.respond(HttpStatusCode.BadRequest, "Invalid SHA-256 hash")
+                        }
 
                         val hash = match.groupValues[1]
                         val extension = match.groupValues.getOrNull(2) ?: ""
@@ -253,11 +272,13 @@ class CustomHttpServer(
                             val hashETag = "\"$hash\""
 
                             if (clientETag == hashETag) {
+                                Log.d(Morganite.TAG, "Serving $hash (Not Modified)")
                                 call.respond(HttpStatusCode.NotModified)
                                 return@get
                             }
 
                             val mimeType = fileStore.detectMimeType(file)
+                            Log.d(Morganite.TAG, "Serving $hash from local storage ($mimeType)")
                             call.respondFile(file) {
                                 call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
                                 call.response.headers.appendIfAbsent(HttpHeaders.ETag, hash)
@@ -269,8 +290,11 @@ class CustomHttpServer(
                         val xsServers = call.request.queryParameters.getAll("xs") ?: emptyList()
                         val authorPubkeys = call.request.queryParameters.getAll("as") ?: emptyList()
 
+                        Log.d(Morganite.TAG, "$hash not found locally. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
+
                         // Attempt retrieval from xs hints
                         for (server in xsServers) {
+                            Log.d(Morganite.TAG, "Trying xs hint server: $server")
                             val success = tryFetchAndStream(server, hash, extension, call)
                             if (success) return@get // Exit the route on first success
                         }
@@ -278,28 +302,34 @@ class CustomHttpServer(
                         // Attempt retrieval from author server lists
                         for (pubkey in authorPubkeys) {
                             val servers = fetchAuthorServers(pubkey) // BUD-03 kind:10063
-                            // Label the loop so we can jump to the next iteration from deep inside
                             for (server in servers) {
+                                Log.d(Morganite.TAG, "Trying author server: $server for $pubkey")
                                 val success = tryFetchAndStream(server, hash, extension, call)
                                 if (success) return@get // Exit the route on first success
                             }
                         }
 
+                        Log.d(Morganite.TAG, "Resource $hash not found on any server")
                         call.respond(HttpStatusCode.NotFound)
                     }
 
                     head {
-                        val hash = extractHash(call.request.path()) ?: run {
+                        val path = call.request.path()
+                        Log.d(Morganite.TAG, "HEAD request: $path")
+                        val hash = extractHash(path) ?: run {
+                            Log.d(Morganite.TAG, "Invalid hash in path: $path")
                             call.respond(HttpStatusCode.BadRequest)
                             return@head
                         }
 
                         val file = fileStore.getFileByHash(hash) ?: run {
+                            Log.d(Morganite.TAG, "File not found for hash: $hash")
                             call.respond(HttpStatusCode.NotFound)
                             return@head
                         }
 
                         val mimeType = fileStore.detectMimeType(file)
+                        Log.d(Morganite.TAG, "HEAD response for $hash: $mimeType, ${file.length()} bytes")
 
                         call.response.status(HttpStatusCode.OK)
                         call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
