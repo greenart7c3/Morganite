@@ -24,6 +24,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.greenart7c3.morganite.ui.theme.MorganiteTheme
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
+import kotlin.text.format
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,7 +53,8 @@ class MainActivity : ComponentActivity() {
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center,
                     ) {
-                        Text(stringResource(R.string.storage_used_mb, DecimalFormat("#.###").format(Morganite.instance.httpServer.fileStore.getSize() / (1024.0 * 1024.0))))
+                        val storageSize = Morganite.instance.httpServer.fileStore.size.collectAsStateWithLifecycle()
+                        Text(stringResource(R.string.storage_used_mb, DecimalFormat("#.###").format(storageSize.value / (1024.0 * 1024.0))))
                         if (isRunning.value) {
                             ElevatedButton(
                                 onClick = {

@@ -2,6 +2,9 @@ package com.greenart7c3.morganite.service
 
 import android.content.Context
 import com.vitorpamplona.quartz.utils.sha256.pool
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.apache.tika.Tika
 import java.io.File
 import java.io.IOException
@@ -14,8 +17,16 @@ class AndroidFileStore(
 
     private val blobDir = File(context.filesDir, "blobs")
 
+    private val _size = MutableStateFlow(0L)
+    override val size: StateFlow<Long> = _size.asStateFlow()
+
     init {
         blobDir.mkdirs()
+        updateSize()
+    }
+
+    private fun updateSize() {
+        _size.value = blobDir.listFiles()?.sumOf { it.length() } ?: 0L
     }
 
     override fun getFileByHash(hash: String): File? {
@@ -40,6 +51,7 @@ class AndroidFileStore(
         }
 
         pruneIfNeeded()
+        updateSize()
 
         return hash
     }
@@ -53,6 +65,7 @@ class AndroidFileStore(
                 StandardCopyOption.REPLACE_EXISTING,
             )
             pruneIfNeeded()
+            updateSize()
         } catch (e: IOException) {
             // Fallback: If move fails, ensure we clean up the temp file
             if (tempFile.exists()) tempFile.delete()
@@ -68,10 +81,6 @@ class AndroidFileStore(
     override fun detectMimeType(file: File): String {
         val tika = Tika()
         return tika.detect(file)
-    }
-
-    override fun getSize(): Long {
-        return blobDir.listFiles()?.sumOf { it.length() } ?: 0L
     }
 
     private fun pruneIfNeeded() {
