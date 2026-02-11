@@ -107,4 +107,5 @@ dependencies {
     implementation(libs.okhttp)
     implementation(libs.tika.core)
     implementation(libs.quartz)
+    implementation(libs.tor.android)
 }

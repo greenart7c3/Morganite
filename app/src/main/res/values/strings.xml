@@ -4,4 +4,6 @@
     <string name="stop">Stop</string>
     <string name="start">Start</string>
     <string name="storage_used_mb">Storage used: %1$s MB</string>
+    <string name="use_tor">Use Tor</string>
+    <string name="use_tor_for_all_urls">Use Tor for all URLs</string>
 </resources>

@@ -1,6 +1,11 @@
 package com.greenart7c3.morganite
 
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.util.Log
+import com.greenart7c3.morganite.models.SettingsManager
 import com.greenart7c3.morganite.service.FileStore
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.downloadFirstEvent
@@ -40,9 +45,13 @@ import io.ktor.server.routing.routing
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.torproject.jni.TorService
 import java.io.File
+import java.net.InetSocketAddress
+import java.net.Proxy
 import java.security.MessageDigest
 
 class NostrClientLoggerListener() : IRelayClientListener {
@@ -81,16 +90,86 @@ class NostrClientLoggerListener() : IRelayClientListener {
 
 class CustomHttpServer(
     val fileStore: FileStore,
+    val settingsManager: SettingsManager,
 ) {
     val isRunning = MutableStateFlow(false)
+    val torStatus = MutableStateFlow(TorService.STATUS_OFF)
 
     lateinit var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>
-    val rootClient = OkHttpClient.Builder().build()
-    val socketBuilder = BasicOkHttpWebSocket.Builder { _ -> rootClient }
+    private var rootClient = OkHttpClient.Builder().build()
+    private var torClient = OkHttpClient.Builder().build()
+    val socketBuilder = BasicOkHttpWebSocket.Builder { _ -> if (settingsManager.settings.value.useTor) torClient else rootClient }
     val nostrClient = NostrClient(socketBuilder)
+
+    private val torStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            Log.d(Morganite.TAG, "Received Broadcast: ${intent?.action}")
+            when (intent?.action) {
+                TorService.ACTION_STATUS -> {
+                    val status = intent.getStringExtra(TorService.EXTRA_STATUS) ?: TorService.STATUS_OFF
+                    Log.d(Morganite.TAG, "Tor connection status: $status")
+                    torStatus.value = status
+                    updateClients()
+                }
+                TorService.ACTION_ERROR -> {
+                    val error = intent.getStringExtra(Intent.EXTRA_TEXT)
+                    Log.e(Morganite.TAG, "Tor connection error: $error")
+                }
+            }
+        }
+    }
 
     val listener = NostrClientLoggerListener().also {
         nostrClient.subscribe(it)
+    }
+
+    init {
+        updateClients()
+        val filter = IntentFilter().apply {
+            addAction(TorService.ACTION_STATUS)
+            addAction(TorService.ACTION_ERROR)
+        }
+        Morganite.instance.registerReceiver(torStatusReceiver, filter, Context.RECEIVER_EXPORTED)
+
+        Morganite.instance.scope.launch {
+            settingsManager.settings.collect {
+                if (it.useTor && torStatus.value == TorService.STATUS_OFF) {
+                    Log.d(Morganite.TAG, "Tor enabled in settings, starting service...")
+                    startTor()
+                } else if (!it.useTor && torStatus.value != TorService.STATUS_OFF) {
+                    Log.d(Morganite.TAG, "Tor disabled in settings, stopping service...")
+                    stopTor()
+                }
+                updateClients()
+            }
+        }
+    }
+
+    private fun updateClients() {
+        val settings = settingsManager.settings.value
+        Log.d(Morganite.TAG, "Updating clients. useTor: ${settings.useTor}, status: ${torStatus.value}")
+
+        // Use default port 9050 if not yet reported by TorService
+        val port = if (TorService.socksPort > 0) TorService.socksPort else 9050
+        val torProxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
+
+        if (settings.useTor) {
+            // Always configure torClient with proxy if useTor is enabled
+            // This ensures no leaks for .onion even during bootstrap
+            torClient = OkHttpClient.Builder()
+                .proxy(torProxy)
+                .build()
+
+            if (settings.useTorForAllUrls) {
+                Log.d(Morganite.TAG, "Routing all traffic through Tor proxy")
+                rootClient = torClient
+            } else {
+                rootClient = OkHttpClient.Builder().build()
+            }
+        } else {
+            rootClient = OkHttpClient.Builder().build()
+            torClient = rootClient
+        }
     }
 
     suspend fun start() {
@@ -100,14 +179,35 @@ class CustomHttpServer(
             return
         }
         Log.d(Morganite.TAG, "Starting CustomHttpServer")
+        if (settingsManager.settings.value.useTor) {
+            startTor()
+        }
+        updateClients()
         server = startKtorHttpServer()
         startMonitoring()
         server.startSuspend()
     }
 
+    private fun startTor() {
+        Log.d(Morganite.TAG, "Starting Tor Service via Intent")
+        val intent = Intent(Morganite.instance, TorService::class.java)
+        intent.action = TorService.ACTION_START
+        Morganite.instance.startService(intent)
+    }
+
+    private fun stopTor() {
+        Log.d(Morganite.TAG, "Stopping Tor Service via Intent")
+        val intent = Intent(Morganite.instance, TorService::class.java)
+        intent.action = TorService.ACTION_STOP
+        Morganite.instance.startService(intent)
+    }
+
     suspend fun stop() {
         Log.d(Morganite.TAG, "Stopping CustomHttpServer")
         server.stopSuspend()
+        if (settingsManager.settings.value.useTor) {
+            stopTor()
+        }
     }
 
     fun extractHash(path: String): String? {
@@ -147,10 +247,17 @@ class CustomHttpServer(
         call: ApplicationCall,
     ): Boolean {
         val url = buildUrl(server, hash, extension)
-        Log.d(Morganite.TAG, "Attempting to fetch and stream from $url")
+        val useTor = url.contains(".onion") || settingsManager.settings.value.useTorForAllUrls
+        Log.d(Morganite.TAG, "Attempting to fetch and stream from $url (Use Tor: $useTor)")
+
+        val client = if (useTor) {
+            torClient
+        } else {
+            rootClient
+        }
 
         return try {
-            rootClient.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
                     Log.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
                     return false // Try next server
