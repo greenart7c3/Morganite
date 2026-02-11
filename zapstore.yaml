@@ -2,5 +2,3 @@ identifier: com.greenart7c3.morganite
 name: Morganite
 description: Local Blossom Cache for Android.
 repository: https://github.com/greenart7c3/Morganite
-assets:
-  - amber-free-arm64-v8a-v\d+\.\d+\.\d.apk
