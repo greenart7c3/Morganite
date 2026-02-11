@@ -43,7 +43,7 @@ class HttpServerService : Service() {
         val notificationBuilder = NotificationCompat.Builder(this, "HttpServerServiceChannel")
             .setContentTitle("Service")
             .setContentText("Server is running in the background")
-            .setSmallIcon(R.drawable.ic_morganite)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setPriority(NotificationCompat.PRIORITY_DEFAULT)
             .setGroup(groupId)
             .setContentIntent(pendingIntent)
