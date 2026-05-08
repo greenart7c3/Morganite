@@ -218,7 +218,26 @@ class CustomHttpServer(
     fun buildUrl(server: String, hash: String, extension: String): String {
         val s = if (server.startsWith("http://") || server.startsWith("https://")) server
         else "https://$server"
-        return "$s/$hash$extension"
+        return "${s.trimEnd('/')}/$hash$extension"
+    }
+
+    /**
+     * Builds the upstream URL for an `xs` hint, preserving the original
+     * request path so non-Blossom-standard prefixes (e.g. `/i/` on
+     * cdn.nostr.build) survive. If the `xs` hint itself carries a path,
+     * we fall back to Blossom convention `<xs>/<hash><ext>`.
+     */
+    fun buildUrlForXs(xs: String, requestPath: String, hash: String, extension: String): String {
+        val s = if (xs.startsWith("http://") || xs.startsWith("https://")) xs
+        else "https://$xs"
+        val uri = runCatching { java.net.URI(s) }.getOrNull()
+        val xsHasPath = uri?.path?.let { it.isNotEmpty() && it != "/" } == true
+        if (xsHasPath || uri?.authority == null) {
+            return "${s.trimEnd('/')}/$hash$extension"
+        }
+        val origin = "${uri.scheme}://${uri.authority}"
+        val normalizedPath = if (requestPath.startsWith("/")) requestPath else "/$requestPath"
+        return "$origin$normalizedPath"
     }
 
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
@@ -241,12 +260,10 @@ class CustomHttpServer(
     }
 
     private suspend fun tryFetchAndStream(
-        server: String,
+        url: String,
         hash: String,
-        extension: String,
         call: ApplicationCall,
     ): Boolean {
-        val url = buildUrl(server, hash, extension)
         val useTor = url.contains(".onion") || settingsManager.settings.value.useTorForAllUrls
         Log.d(Morganite.TAG, "Attempting to fetch and stream from $url (Use Tor: $useTor)")
 
@@ -399,19 +416,21 @@ class CustomHttpServer(
 
                         Log.d(Morganite.TAG, "$hash not found locally. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
 
-                        // Attempt retrieval from xs hints
+                        // Attempt retrieval from xs hints (preserve original request path)
                         for (server in xsServers) {
-                            Log.d(Morganite.TAG, "Trying xs hint server: $server")
-                            val success = tryFetchAndStream(server, hash, extension, call)
+                            val url = buildUrlForXs(server, path, hash, extension)
+                            Log.d(Morganite.TAG, "Trying xs hint: $url")
+                            val success = tryFetchAndStream(url, hash, call)
                             if (success) return@get // Exit the route on first success
                         }
 
-                        // Attempt retrieval from author server lists
+                        // Attempt retrieval from author server lists (Blossom standard)
                         for (pubkey in authorPubkeys) {
                             val servers = fetchAuthorServers(pubkey) // BUD-03 kind:10063
                             for (server in servers) {
-                                Log.d(Morganite.TAG, "Trying author server: $server for $pubkey")
-                                val success = tryFetchAndStream(server, hash, extension, call)
+                                val url = buildUrl(server, hash, extension)
+                                Log.d(Morganite.TAG, "Trying author server: $url for $pubkey")
+                                val success = tryFetchAndStream(url, hash, call)
                                 if (success) return@get // Exit the route on first success
                             }
                         }
