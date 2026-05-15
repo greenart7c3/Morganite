@@ -198,6 +198,57 @@ class CustomHttpServer(
         return servers
     }
 
+    private fun tryFetchAndSave(
+        server: String,
+        hash: String,
+        extension: String,
+    ): Boolean {
+        val url = buildUrl(server, hash, extension)
+        val useTor = url.contains(".onion") || settingsManager.settings.value.useTorForAllUrls
+        Log.d(Morganite.TAG, "Attempting to fetch and save from $url (Use Tor: $useTor)")
+
+        val client = if (useTor) {
+            torClient
+        } else {
+            rootClient
+        }
+
+        return try {
+            client.newCall(Request.Builder().url(url).build()).execute().use { response ->
+                if (!response.isSuccessful) {
+                    Log.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
+                    return false
+                }
+
+                val body = response.body ?: run {
+                    Log.d(Morganite.TAG, "Fetch failed from $url: Empty body")
+                    return false
+                }
+
+                val tempFile = File.createTempFile("download-", ".tmp")
+
+                try {
+                    body.byteStream().use { inputStream ->
+                        tempFile.outputStream().use { fileOut ->
+                            inputStream.copyTo(fileOut)
+                        }
+                    }
+
+                    fileStore.moveFile(tempFile, hash)
+                    Log.d(Morganite.TAG, "Successfully saved $hash from $url")
+                    true
+                } catch (e: Exception) {
+                    Log.e(Morganite.TAG, "Error while saving from $url", e)
+                    if (tempFile.exists()) tempFile.delete()
+                    false
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(Morganite.TAG, "Network error fetching from $url", e)
+            false
+        }
+    }
+
     private suspend fun tryFetchAndStream(
         server: String,
         hash: String,
@@ -381,13 +432,50 @@ class CustomHttpServer(
                     head {
                         val path = call.request.path()
                         Log.d(Morganite.TAG, "HEAD request: $path")
-                        val hash = extractHash(path) ?: run {
-                            Log.d(Morganite.TAG, "Invalid hash in path: $path")
+                        val regex = Regex("([0-9a-f]{64})(\\.[a-z0-9]+)?")
+                        val match = regex.find(path) ?: run {
+                            Log.d(Morganite.TAG, "Invalid SHA-256 hash in path: $path")
                             call.respond(HttpStatusCode.BadRequest)
                             return@head
                         }
 
-                        val file = fileStore.getFileByHash(hash) ?: run {
+                        val hash = match.groupValues[1]
+                        val extension = match.groupValues.getOrNull(2) ?: ""
+
+                        var file = fileStore.getFileByHash(hash)
+                        if (file == null || !file.exists()) {
+                            // Blob not found locally → attempt proxy retrieval using BUD-10 hints
+                            val xsServers = call.request.queryParameters.getAll("xs") ?: emptyList()
+                            val authorPubkeys = call.request.queryParameters.getAll("as") ?: emptyList()
+
+                            Log.d(Morganite.TAG, "$hash not found locally for HEAD. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
+
+                            for (server in xsServers) {
+                                Log.d(Morganite.TAG, "Trying xs hint server: $server")
+                                if (tryFetchAndSave(server, hash, extension)) {
+                                    file = fileStore.getFileByHash(hash)
+                                    break
+                                }
+                            }
+
+                            if (file == null || !file.exists()) {
+                                for (pubkey in authorPubkeys) {
+                                    val servers = fetchAuthorServers(pubkey)
+                                    var found = false
+                                    for (server in servers) {
+                                        Log.d(Morganite.TAG, "Trying author server: $server for $pubkey")
+                                        if (tryFetchAndSave(server, hash, extension)) {
+                                            file = fileStore.getFileByHash(hash)
+                                            found = true
+                                            break
+                                        }
+                                    }
+                                    if (found) break
+                                }
+                            }
+                        }
+
+                        if (file == null || !file.exists()) {
                             Log.d(Morganite.TAG, "File not found for hash: $hash")
                             call.respond(HttpStatusCode.NotFound)
                             return@head
