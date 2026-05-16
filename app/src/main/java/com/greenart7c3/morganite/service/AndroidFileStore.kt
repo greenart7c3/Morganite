@@ -83,6 +83,11 @@ class AndroidFileStore(
         return tika.detect(file)
     }
 
+    override fun clear() {
+        blobDir.listFiles()?.forEach { it.delete() }
+        updateSize()
+    }
+
     private fun pruneIfNeeded() {
         val files = blobDir.listFiles() ?: return
         val currentSize = files.sumOf { it.length() }

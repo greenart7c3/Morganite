@@ -18,13 +18,18 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ElevatedButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -66,6 +71,39 @@ class MainActivity : ComponentActivity() {
                     ) {
                         val storageSize by Morganite.instance.httpServer.fileStore.size.collectAsStateWithLifecycle()
                         Text(stringResource(R.string.storage_used_mb, DecimalFormat("#.###").format(storageSize / (1024.0 * 1024.0))))
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        var showClearDialog by remember { mutableStateOf(false) }
+                        ElevatedButton(
+                            onClick = { showClearDialog = true },
+                            content = { Text(stringResource(R.string.clear_storage)) },
+                        )
+
+                        if (showClearDialog) {
+                            AlertDialog(
+                                onDismissRequest = { showClearDialog = false },
+                                title = { Text(stringResource(R.string.clear_storage_confirmation_title)) },
+                                text = { Text(stringResource(R.string.clear_storage_confirmation_message)) },
+                                confirmButton = {
+                                    TextButton(
+                                        onClick = {
+                                            showClearDialog = false
+                                            Morganite.instance.scope.launch {
+                                                Morganite.instance.httpServer.fileStore.clear()
+                                            }
+                                        },
+                                    ) {
+                                        Text(stringResource(R.string.confirm))
+                                    }
+                                },
+                                dismissButton = {
+                                    TextButton(onClick = { showClearDialog = false }) {
+                                        Text(stringResource(R.string.cancel))
+                                    }
+                                },
+                            )
+                        }
 
                         Spacer(modifier = Modifier.height(16.dp))
 

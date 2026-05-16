@@ -9,4 +9,5 @@ interface FileStore {
     fun saveBlob(bytes: ByteArray): String
     fun moveFile(tempFile: File, hash: String)
     fun detectMimeType(file: File): String
+    fun clear()
 }
