@@ -9,10 +9,6 @@ import com.greenart7c3.morganite.models.SettingsManager
 import com.greenart7c3.morganite.service.FileStore
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
 import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.downloadFirstEvent
-import com.vitorpamplona.quartz.nip01Core.relay.client.listeners.IRelayClientListener
-import com.vitorpamplona.quartz.nip01Core.relay.client.single.IRelayClient
-import com.vitorpamplona.quartz.nip01Core.relay.commands.toClient.Message
-import com.vitorpamplona.quartz.nip01Core.relay.commands.toRelay.Command
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.relay.sockets.okhttp.BasicOkHttpWebSocket
@@ -54,40 +50,6 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.security.MessageDigest
 
-class NostrClientLoggerListener() : IRelayClientListener {
-    override fun onCannotConnect(relay: IRelayClient, errorMessage: String) {
-        Log.d(Morganite.TAG, "onCannotConnect")
-        super.onCannotConnect(relay, errorMessage)
-    }
-
-    override fun onSent(relay: IRelayClient, cmdStr: String, cmd: Command, success: Boolean) {
-        Log.d(Morganite.TAG, "onSent $cmdStr $success")
-
-        super.onSent(relay, cmdStr, cmd, success)
-    }
-
-    override fun onIncomingMessage(relay: IRelayClient, msgStr: String, msg: Message) {
-        Log.d(Morganite.TAG, "onIncomingMessage $msgStr")
-
-        super.onIncomingMessage(relay, msgStr, msg)
-    }
-
-    override fun onDisconnected(relay: IRelayClient) {
-        Log.d(Morganite.TAG, "onDisconnected")
-        super.onDisconnected(relay)
-    }
-
-    override fun onConnecting(relay: IRelayClient) {
-        Log.d(Morganite.TAG, "onConnecting")
-        super.onConnecting(relay)
-    }
-
-    override fun onConnected(relay: IRelayClient, pingMillis: Int, compressed: Boolean) {
-        Log.d(Morganite.TAG, "onConnected")
-        super.onConnected(relay, pingMillis, compressed)
-    }
-}
-
 class CustomHttpServer(
     val fileStore: FileStore,
     val settingsManager: SettingsManager,
@@ -117,10 +79,6 @@ class CustomHttpServer(
                 }
             }
         }
-    }
-
-    val listener = NostrClientLoggerListener().also {
-        nostrClient.subscribe(it)
     }
 
     init {

@@ -41,6 +41,16 @@ import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 
 class MainActivity : ComponentActivity() {
+    override fun onStart() {
+        super.onStart()
+        Morganite.instance.startLogStream()
+    }
+
+    override fun onStop() {
+        Morganite.instance.stopLogStream()
+        super.onStop()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
