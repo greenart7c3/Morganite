@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.greenart7c3.morganite.models.SettingsManager
 import com.greenart7c3.morganite.service.FileStore
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
@@ -54,7 +55,7 @@ class CustomHttpServer(
     val fileStore: FileStore,
     val settingsManager: SettingsManager,
 ) {
-    val isRunning = MutableStateFlow(false)
+    val isRunning = MutableStateFlow(value = false)
     val torStatus = MutableStateFlow(TorService.STATUS_OFF)
 
     lateinit var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>
@@ -87,14 +88,19 @@ class CustomHttpServer(
             addAction(TorService.ACTION_STATUS)
             addAction(TorService.ACTION_ERROR)
         }
-        Morganite.instance.registerReceiver(torStatusReceiver, filter, Context.RECEIVER_EXPORTED)
+        ContextCompat.registerReceiver(
+            Morganite.instance,
+            torStatusReceiver,
+            filter,
+            ContextCompat.RECEIVER_EXPORTED,
+        )
 
         Morganite.instance.scope.launch {
             settingsManager.settings.collect {
-                if (it.useTor && torStatus.value == TorService.STATUS_OFF) {
+                if (it.useTor && (torStatus.value == TorService.STATUS_OFF)) {
                     Log.d(Morganite.TAG, "Tor enabled in settings, starting service...")
                     startTor()
-                } else if (!it.useTor && torStatus.value != TorService.STATUS_OFF) {
+                } else if (!it.useTor && (torStatus.value != TorService.STATUS_OFF)) {
                     Log.d(Morganite.TAG, "Tor disabled in settings, stopping service...")
                     stopTor()
                 }
@@ -118,11 +124,11 @@ class CustomHttpServer(
                 .proxy(torProxy)
                 .build()
 
-            if (settings.useTorForAllUrls) {
+            rootClient = if (settings.useTorForAllUrls) {
                 Log.d(Morganite.TAG, "Routing all traffic through Tor proxy")
-                rootClient = torClient
+                torClient
             } else {
-                rootClient = OkHttpClient.Builder().build()
+                OkHttpClient.Builder().build()
             }
         } else {
             rootClient = OkHttpClient.Builder().build()
@@ -168,11 +174,6 @@ class CustomHttpServer(
         }
     }
 
-    fun extractHash(path: String): String? {
-        val regex = Regex("""/([0-9a-f]{64})(?:\.[^/]+)?$""")
-        return regex.find(path)?.groupValues?.get(1)
-    }
-
     fun buildUrl(server: String, hash: String, extension: String): String {
         val s = if (server.startsWith("http://") || server.startsWith("https://")) server
         else "https://$server"
@@ -188,9 +189,9 @@ class CustomHttpServer(
                         kinds = listOf(BlossomServersEvent.KIND),
                         authors = listOf(pubkey),
                         limit = 1,
-                    )
-                )
-            )
+                    ),
+                ),
+            ),
         )
 
         val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
@@ -220,10 +221,7 @@ class CustomHttpServer(
                     return false
                 }
 
-                val body = response.body ?: run {
-                    Log.d(Morganite.TAG, "Fetch failed from $url: Empty body")
-                    return false
-                }
+                val body = response.body
 
                 val tempFile = File.createTempFile("download-", ".tmp")
 
@@ -272,10 +270,7 @@ class CustomHttpServer(
                     return false // Try next server
                 }
 
-                val body = response.body ?: run {
-                    Log.d(Morganite.TAG, "Fetch failed from $url: Empty body")
-                    return false
-                }
+                val body = response.body
                 val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
                     ?: ContentType.Application.OctetStream
 
