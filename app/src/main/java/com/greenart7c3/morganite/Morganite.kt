@@ -43,16 +43,14 @@ class Morganite: Application() {
         logStreamJob = scope.launch(Dispatchers.IO) {
             try {
                 Runtime.getRuntime().exec("logcat -c")
-                // Filter at logcat level so we don't read (and wake up for) every
-                // system log line on the device — only Morganite's own tag.
-                val process = Runtime.getRuntime().exec(
-                    arrayOf("logcat", "-v", "time", "$TAG:V", "*:S"),
-                )
+                val process = Runtime.getRuntime().exec("logcat -v time")
                 logStreamProcess = process
                 process.inputStream.bufferedReader().use { reader ->
                     while (true) {
                         val line = reader.readLine() ?: break
-                        logStream.value = (logStream.value + line).takeLast(100)
+                        if (line.contains(TAG)) {
+                            logStream.value = (logStream.value + line).takeLast(100)
+                        }
                     }
                 }
             } catch (e: Exception) {
