@@ -7,4 +7,9 @@
     <string name="storage_used_mb">Storage used: %1$s MB</string>
     <string name="use_tor">Use Tor</string>
     <string name="use_tor_for_all_urls">Use Tor for all URLs</string>
+    <string name="clear_storage">Clear storage</string>
+    <string name="clear_storage_confirmation_title">Clear storage?</string>
+    <string name="clear_storage_confirmation_message">This will delete all stored blobs. This action cannot be undone.</string>
+    <string name="confirm">Confirm</string>
+    <string name="cancel">Cancel</string>
 </resources>
