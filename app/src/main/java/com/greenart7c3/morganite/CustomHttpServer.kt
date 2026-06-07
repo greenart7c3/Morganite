@@ -120,6 +120,13 @@ class CustomHttpServer(
         val settings = settingsManager.settings.value
         Log.d(Morganite.TAG, "Updating clients. useTor: ${settings.useTor}, status: ${torStatus.value}")
 
+        // Capture the clients we are about to replace so their idle connection
+        // pools and dispatcher threads can be released afterwards. Without this,
+        // every settings/Tor-status change leaks an OkHttpClient whose idle
+        // sockets keep the radio warm until OkHttp's ~5 min eviction.
+        val oldRootClient = rootClient
+        val oldTorClient = torClient
+
         // Use default port 9050 if not yet reported by TorService
         val port = if (TorService.socksPort > 0) TorService.socksPort else 9050
         val torProxy = Proxy(Proxy.Type.SOCKS, InetSocketAddress("127.0.0.1", port))
@@ -140,6 +147,15 @@ class CustomHttpServer(
         } else {
             rootClient = OkHttpClient.Builder().build()
             torClient = rootClient
+        }
+
+        // Release each distinct replaced client that is not reused as a new one.
+        // evictAll() only closes idle connections and shutdown() is graceful, so
+        // any in-flight request on an old client is left to finish on its own.
+        for (old in setOf(oldRootClient, oldTorClient)) {
+            if (old === rootClient || old === torClient) continue
+            old.connectionPool.evictAll()
+            old.dispatcher.executorService.shutdown()
         }
     }
 

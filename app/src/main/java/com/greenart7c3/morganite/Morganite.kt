@@ -42,8 +42,12 @@ class Morganite: Application() {
         if (logStreamJob?.isActive == true) return
         logStreamJob = scope.launch(Dispatchers.IO) {
             try {
-                Runtime.getRuntime().exec("logcat -c")
-                val process = Runtime.getRuntime().exec("logcat -v time")
+                Runtime.getRuntime().exec(arrayOf("logcat", "-c"))
+                // Filter at the logcat level so only Morganite-tagged lines are
+                // delivered to this process. Without "$TAG:V *:S" we would receive
+                // every log line from every app on the device and scan each one,
+                // waking the CPU constantly the whole time the UI is visible.
+                val process = Runtime.getRuntime().exec(arrayOf("logcat", "-v", "time", "$TAG:V", "*:S"))
                 logStreamProcess = process
                 process.inputStream.bufferedReader().use { reader ->
                     while (true) {
