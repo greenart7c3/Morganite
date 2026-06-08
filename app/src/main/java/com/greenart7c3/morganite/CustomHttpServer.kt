@@ -13,6 +13,7 @@ import com.vitorpamplona.quartz.nip01Core.relay.client.accessories.downloadFirst
 import com.vitorpamplona.quartz.nip01Core.relay.filters.Filter
 import com.vitorpamplona.quartz.nip01Core.relay.normalizer.NormalizedRelayUrl
 import com.vitorpamplona.quartz.nip01Core.relay.sockets.okhttp.BasicOkHttpWebSocket
+import com.vitorpamplona.quartz.nip65RelayList.AdvertisedRelayListEvent
 import com.vitorpamplona.quartz.nipB7Blossom.BlossomServersEvent
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -63,6 +64,12 @@ class CustomHttpServer(
     private var torClient = OkHttpClient.Builder().build()
     val socketBuilder = BasicOkHttpWebSocket.Builder { _ -> if (settingsManager.settings.value.useTor) torClient else rootClient }
     val nostrClient = NostrClient(socketBuilder)
+
+    private val fallbackRelays = listOf(
+        NormalizedRelayUrl("wss://nostr.land"),
+        NormalizedRelayUrl("wss://nos.lol"),
+        NormalizedRelayUrl("wss://relay.damus.io"),
+    )
 
     private val torStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -180,18 +187,40 @@ class CustomHttpServer(
         return "$s/$hash$extension"
     }
 
+    suspend fun fetchInboxRelays(pubkey: String): List<NormalizedRelayUrl> {
+        Log.d(Morganite.TAG, "Fetching inbox relays for $pubkey")
+        val event = nostrClient.downloadFirstEvent(
+            filters = fallbackRelays.associateWith {
+                listOf(
+                    Filter(
+                        kinds = listOf(AdvertisedRelayListEvent.KIND),
+                        authors = listOf(pubkey),
+                        limit = 1,
+                    ),
+                )
+            },
+        )
+
+        val relays = (event as? AdvertisedRelayListEvent)?.readRelaysNorm() ?: emptyList()
+        Log.d(Morganite.TAG, "Found ${relays.size} inbox relays for $pubkey")
+        return relays
+    }
+
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
         Log.d(Morganite.TAG, "Fetching author servers for $pubkey")
+        val inboxRelays = fetchInboxRelays(pubkey)
+        val queryRelays = (inboxRelays + fallbackRelays).distinct()
+
         val event = nostrClient.downloadFirstEvent(
-            filters = mapOf(
-                NormalizedRelayUrl("wss://nostr.land") to listOf(
+            filters = queryRelays.associateWith {
+                listOf(
                     Filter(
                         kinds = listOf(BlossomServersEvent.KIND),
                         authors = listOf(pubkey),
                         limit = 1,
                     ),
-                ),
-            ),
+                )
+            },
         )
 
         val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
