@@ -177,12 +177,20 @@ class CustomHttpServer(
         }
 
         // Release each distinct replaced client that is not reused as a new one.
-        // evictAll() only closes idle connections and shutdown() is graceful, so
-        // any in-flight request on an old client is left to finish on its own.
-        for (old in setOf(oldRootClient, oldTorClient)) {
-            if (old === rootClient || old === torClient) continue
-            old.connectionPool.evictAll()
-            old.dispatcher.executorService.shutdown()
+        // evictAll() closes idle sockets (network I/O) and updateClients() runs on
+        // the main thread from the Tor status broadcast receiver, so do the release
+        // on a background dispatcher to avoid NetworkOnMainThreadException. evictAll()
+        // only closes idle connections and shutdown() is graceful, so any in-flight
+        // request on an old client is left to finish on its own.
+        val clientsToRelease = setOf(oldRootClient, oldTorClient)
+            .filter { it !== rootClient && it !== torClient }
+        if (clientsToRelease.isNotEmpty()) {
+            Morganite.instance.scope.launch {
+                for (old in clientsToRelease) {
+                    old.connectionPool.evictAll()
+                    old.dispatcher.executorService.shutdown()
+                }
+            }
         }
     }
 
