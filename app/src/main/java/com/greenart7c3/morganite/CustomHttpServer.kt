@@ -51,6 +51,7 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 
 class CustomHttpServer(
     val fileStore: FileStore,
@@ -70,6 +71,13 @@ class CustomHttpServer(
         NormalizedRelayUrl("wss://nos.lol"),
         NormalizedRelayUrl("wss://relay.damus.io"),
     )
+
+    // Number of author-server lookups currently in flight. downloadFirstEvent only
+    // closes the subscription, not the relay socket, and NostrClient's RelayPool
+    // keeps that socket alive with an auto-reconnect loop. We therefore disconnect
+    // once the last lookup finishes so no WebSocket lingers (and reconnects) in the
+    // background — the main source of battery drain while the app is idle.
+    private val activeAuthorLookups = AtomicInteger(0)
 
     private val torStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -192,6 +200,7 @@ class CustomHttpServer(
     suspend fun stop() {
         Log.d(Morganite.TAG, "Stopping CustomHttpServer")
         server.stopSuspend()
+        nostrClient.disconnect()
         if (settingsManager.settings.value.useTor) {
             stopTor()
         }
@@ -224,24 +233,34 @@ class CustomHttpServer(
 
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
         Log.d(Morganite.TAG, "Fetching author servers for $pubkey")
-        val inboxRelays = fetchInboxRelays(pubkey)
-        val queryRelays = (inboxRelays + fallbackRelays).distinct()
+        activeAuthorLookups.incrementAndGet()
+        try {
+            val inboxRelays = fetchInboxRelays(pubkey)
+            val queryRelays = (inboxRelays + fallbackRelays).distinct()
 
-        val event = nostrClient.downloadFirstEvent(
-            filters = queryRelays.associateWith {
-                listOf(
-                    Filter(
-                        kinds = listOf(BlossomServersEvent.KIND),
-                        authors = listOf(pubkey),
-                        limit = 1,
-                    ),
-                )
-            },
-        )
+            val event = nostrClient.downloadFirstEvent(
+                filters = queryRelays.associateWith {
+                    listOf(
+                        Filter(
+                            kinds = listOf(BlossomServersEvent.KIND),
+                            authors = listOf(pubkey),
+                            limit = 1,
+                        ),
+                    )
+                },
+            )
 
-        val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
-        Log.d(Morganite.TAG, "Found ${servers.size} servers for $pubkey")
-        return servers
+            val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
+            Log.d(Morganite.TAG, "Found ${servers.size} servers for $pubkey")
+            return servers
+        } finally {
+            // Close the relay socket once no lookup is still using it, so it does
+            // not stay connected (and keep reconnecting) in the background.
+            if (activeAuthorLookups.decrementAndGet() == 0) {
+                Log.d(Morganite.TAG, "No author lookups in flight, disconnecting nostr client")
+                nostrClient.disconnect()
+            }
+        }
     }
 
     private fun tryFetchAndSave(
