@@ -42,8 +42,14 @@ import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.torproject.jni.TorService
@@ -51,6 +57,7 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.security.MessageDigest
+import java.util.concurrent.atomic.AtomicInteger
 
 class CustomHttpServer(
     val fileStore: FileStore,
@@ -70,6 +77,25 @@ class CustomHttpServer(
         NormalizedRelayUrl("wss://nos.lol"),
         NormalizedRelayUrl("wss://relay.damus.io"),
     )
+
+    // Number of author-server lookups currently in flight. downloadFirstEvent only
+    // closes the subscription, not the relay socket, and NostrClient's RelayPool
+    // keeps that socket alive with an auto-reconnect loop. We therefore disconnect
+    // once the last lookup finishes so no WebSocket lingers (and reconnects) in the
+    // background — the main source of battery drain while the app is idle.
+    private val activeAuthorLookups = AtomicInteger(0)
+
+    // Tor is started on demand (only when a fetch actually needs to be routed
+    // through it) and stopped again after a period of inactivity. Running Tor
+    // continuously keeps the radio awake with circuit/padding traffic and is the
+    // biggest battery drain when the setting is enabled. torUsers counts the
+    // tor-routed operations currently in flight; when it drops to zero we arm
+    // torIdleJob to stop Tor after torIdleTimeoutMs.
+    private val torUsers = AtomicInteger(0)
+    private var torIdleJob: Job? = null
+    private val torStartMutex = Mutex()
+    private val torIdleTimeoutMs = 5 * 60 * 1000L
+    private val torBootstrapTimeoutMs = 60 * 1000L
 
     private val torStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -104,11 +130,12 @@ class CustomHttpServer(
 
         Morganite.instance.scope.launch {
             settingsManager.settings.collect {
-                if (it.useTor && (torStatus.value == TorService.STATUS_OFF)) {
-                    Log.d(Morganite.TAG, "Tor enabled in settings, starting service...")
-                    startTor()
-                } else if (!it.useTor && (torStatus.value != TorService.STATUS_OFF)) {
+                // Tor is no longer started eagerly when the setting is enabled; it
+                // is brought up on demand by ensureTorReady(). We only need to tear
+                // it down here when the user turns the setting off.
+                if (!it.useTor && (torStatus.value != TorService.STATUS_OFF)) {
                     Log.d(Morganite.TAG, "Tor disabled in settings, stopping service...")
+                    torIdleJob?.cancel()
                     stopTor()
                 }
                 updateClients()
@@ -119,6 +146,13 @@ class CustomHttpServer(
     private fun updateClients() {
         val settings = settingsManager.settings.value
         Log.d(Morganite.TAG, "Updating clients. useTor: ${settings.useTor}, status: ${torStatus.value}")
+
+        // Capture the clients we are about to replace so their idle connection
+        // pools and dispatcher threads can be released afterwards. Without this,
+        // every settings/Tor-status change leaks an OkHttpClient whose idle
+        // sockets keep the radio warm until OkHttp's ~5 min eviction.
+        val oldRootClient = rootClient
+        val oldTorClient = torClient
 
         // Use default port 9050 if not yet reported by TorService
         val port = if (TorService.socksPort > 0) TorService.socksPort else 9050
@@ -141,6 +175,23 @@ class CustomHttpServer(
             rootClient = OkHttpClient.Builder().build()
             torClient = rootClient
         }
+
+        // Release each distinct replaced client that is not reused as a new one.
+        // evictAll() closes idle sockets (network I/O) and updateClients() runs on
+        // the main thread from the Tor status broadcast receiver, so do the release
+        // on a background dispatcher to avoid NetworkOnMainThreadException. evictAll()
+        // only closes idle connections and shutdown() is graceful, so any in-flight
+        // request on an old client is left to finish on its own.
+        val clientsToRelease = setOf(oldRootClient, oldTorClient)
+            .filter { it !== rootClient && it !== torClient }
+        if (clientsToRelease.isNotEmpty()) {
+            Morganite.instance.scope.launch {
+                for (old in clientsToRelease) {
+                    old.connectionPool.evictAll()
+                    old.dispatcher.executorService.shutdown()
+                }
+            }
+        }
     }
 
     suspend fun start() {
@@ -150,9 +201,7 @@ class CustomHttpServer(
             return
         }
         Log.d(Morganite.TAG, "Starting CustomHttpServer")
-        if (settingsManager.settings.value.useTor) {
-            startTor()
-        }
+        // Tor is started lazily on the first tor-routed request (see ensureTorReady).
         updateClients()
         server = startKtorHttpServer()
         startMonitoring()
@@ -173,10 +222,48 @@ class CustomHttpServer(
         Morganite.instance.startService(intent)
     }
 
+    /**
+     * Ensures Tor is running and bootstrapped before a tor-routed request proceeds.
+     * Starts the service if it is off and suspends until it reports STATUS_ON (or the
+     * bootstrap timeout elapses, in which case the request goes ahead and is allowed
+     * to fail). Safe to call concurrently — the mutex makes only the first caller
+     * start Tor while the rest wait for the same bootstrap.
+     */
+    private suspend fun ensureTorReady() {
+        if (torStatus.value == TorService.STATUS_ON) return
+        torStartMutex.withLock {
+            if (torStatus.value == TorService.STATUS_ON) return
+            if (torStatus.value != TorService.STATUS_STARTING) {
+                startTor()
+            }
+            val ready = withTimeoutOrNull(torBootstrapTimeoutMs) {
+                torStatus.first { it == TorService.STATUS_ON }
+                true
+            }
+            if (ready == null) {
+                Log.w(Morganite.TAG, "Tor did not become ready within ${torBootstrapTimeoutMs}ms")
+            }
+        }
+    }
+
+    /** Arm a timer to stop Tor once it has been idle (no tor-routed work) long enough. */
+    private fun scheduleTorIdleStop() {
+        torIdleJob?.cancel()
+        torIdleJob = Morganite.instance.scope.launch {
+            delay(torIdleTimeoutMs)
+            if (torUsers.get() == 0 && torStatus.value != TorService.STATUS_OFF) {
+                Log.d(Morganite.TAG, "Tor idle for ${torIdleTimeoutMs}ms, stopping it")
+                stopTor()
+            }
+        }
+    }
+
     suspend fun stop() {
         Log.d(Morganite.TAG, "Stopping CustomHttpServer")
         server.stopSuspend()
-        if (settingsManager.settings.value.useTor) {
+        nostrClient.disconnect()
+        torIdleJob?.cancel()
+        if (torStatus.value != TorService.STATUS_OFF) {
             stopTor()
         }
     }
@@ -208,27 +295,48 @@ class CustomHttpServer(
 
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
         Log.d(Morganite.TAG, "Fetching author servers for $pubkey")
-        val inboxRelays = fetchInboxRelays(pubkey)
-        val queryRelays = (inboxRelays + fallbackRelays).distinct()
+        // The relay websocket is routed through Tor when the setting is on, so make
+        // sure Tor is up first and count this as an active tor user.
+        val needsTor = settingsManager.settings.value.useTor
+        if (needsTor) {
+            torIdleJob?.cancel()
+            torUsers.incrementAndGet()
+        }
+        activeAuthorLookups.incrementAndGet()
+        try {
+            if (needsTor) ensureTorReady()
+            val inboxRelays = fetchInboxRelays(pubkey)
+            val queryRelays = (inboxRelays + fallbackRelays).distinct()
 
-        val event = nostrClient.downloadFirstEvent(
-            filters = queryRelays.associateWith {
-                listOf(
-                    Filter(
-                        kinds = listOf(BlossomServersEvent.KIND),
-                        authors = listOf(pubkey),
-                        limit = 1,
-                    ),
-                )
-            },
-        )
+            val event = nostrClient.downloadFirstEvent(
+                filters = queryRelays.associateWith {
+                    listOf(
+                        Filter(
+                            kinds = listOf(BlossomServersEvent.KIND),
+                            authors = listOf(pubkey),
+                            limit = 1,
+                        ),
+                    )
+                },
+            )
 
-        val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
-        Log.d(Morganite.TAG, "Found ${servers.size} servers for $pubkey")
-        return servers
+            val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
+            Log.d(Morganite.TAG, "Found ${servers.size} servers for $pubkey")
+            return servers
+        } finally {
+            // Close the relay socket once no lookup is still using it, so it does
+            // not stay connected (and keep reconnecting) in the background.
+            if (activeAuthorLookups.decrementAndGet() == 0) {
+                Log.d(Morganite.TAG, "No author lookups in flight, disconnecting nostr client")
+                nostrClient.disconnect()
+            }
+            if (needsTor && torUsers.decrementAndGet() == 0) {
+                scheduleTorIdleStop()
+            }
+        }
     }
 
-    private fun tryFetchAndSave(
+    private suspend fun tryFetchAndSave(
         server: String,
         hash: String,
         extension: String,
@@ -243,6 +351,26 @@ class CustomHttpServer(
             rootClient
         }
 
+        val needsTor = settingsManager.settings.value.useTor && useTor
+        if (needsTor) {
+            torIdleJob?.cancel()
+            torUsers.incrementAndGet()
+        }
+        try {
+            if (needsTor) ensureTorReady()
+            return fetchAndSaveBlocking(client, url, hash)
+        } finally {
+            if (needsTor && torUsers.decrementAndGet() == 0) {
+                scheduleTorIdleStop()
+            }
+        }
+    }
+
+    private fun fetchAndSaveBlocking(
+        client: OkHttpClient,
+        url: String,
+        hash: String,
+    ): Boolean {
         return try {
             client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -292,6 +420,27 @@ class CustomHttpServer(
             rootClient
         }
 
+        val needsTor = settingsManager.settings.value.useTor && useTor
+        if (needsTor) {
+            torIdleJob?.cancel()
+            torUsers.incrementAndGet()
+        }
+        try {
+            if (needsTor) ensureTorReady()
+            return streamFromServer(client, url, hash, call)
+        } finally {
+            if (needsTor && torUsers.decrementAndGet() == 0) {
+                scheduleTorIdleStop()
+            }
+        }
+    }
+
+    private suspend fun streamFromServer(
+        client: OkHttpClient,
+        url: String,
+        hash: String,
+        call: ApplicationCall,
+    ): Boolean {
         return try {
             client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
