@@ -57,6 +57,7 @@ import java.io.File
 import java.net.InetSocketAddress
 import java.net.Proxy
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 
 class CustomHttpServer(
@@ -84,6 +85,40 @@ class CustomHttpServer(
     // once the last lookup finishes so no WebSocket lingers (and reconnects) in the
     // background — the main source of battery drain while the app is idle.
     private val activeAuthorLookups = AtomicInteger(0)
+
+    // Blobs a recent proxy crawl could not find on any hinted server. A request for
+    // a blob that isn't cached locally triggers a full crawl: a connection attempt
+    // to every xs hint server plus a nostr relay lookup per author pubkey, often
+    // routed through Tor. Nothing about a "not found" outcome was remembered, so a
+    // client that keeps asking for an unavailable blob (retries, re-scrolling a
+    // feed) re-ran that whole crawl every time — the main battery drain while
+    // proxying. We cache the negative result briefly, keyed by the blob hash plus
+    // the exact hints supplied, so repeated identical requests answer 404 without
+    // touching the network. A new request carrying different hints gets a fresh
+    // crawl, and the short TTL means a blob that becomes available is picked up soon.
+    private val notFoundCache = ConcurrentHashMap<String, Long>()
+    private val notFoundCacheTtlMs = 60 * 1000L
+    private val notFoundCacheMaxEntries = 256
+
+    private fun proxyCacheKey(hash: String, xsServers: List<String>, authorPubkeys: List<String>): String =
+        hash + "|" + xsServers.sorted().joinToString(",") + "|" + authorPubkeys.sorted().joinToString(",")
+
+    private fun isRecentlyNotFound(key: String): Boolean {
+        val timestamp = notFoundCache[key] ?: return false
+        if (System.currentTimeMillis() - timestamp < notFoundCacheTtlMs) return true
+        notFoundCache.remove(key)
+        return false
+    }
+
+    private fun markNotFound(key: String) {
+        val now = System.currentTimeMillis()
+        // Opportunistically drop expired entries so the map can't grow unbounded
+        // from one-off requests for blobs that are never coming back.
+        if (notFoundCache.size >= notFoundCacheMaxEntries) {
+            notFoundCache.entries.removeAll { now - it.value >= notFoundCacheTtlMs }
+        }
+        notFoundCache[key] = now
+    }
 
     // Tor is started on demand (only when a fetch actually needs to be routed
     // through it) and stopped again after a period of inactivity. Running Tor
@@ -579,6 +614,12 @@ class CustomHttpServer(
                         val xsServers = call.request.queryParameters.getAll("xs") ?: emptyList()
                         val authorPubkeys = call.request.queryParameters.getAll("as") ?: emptyList()
 
+                        val cacheKey = proxyCacheKey(hash, xsServers, authorPubkeys)
+                        if (isRecentlyNotFound(cacheKey)) {
+                            Log.d(Morganite.TAG, "Skipping proxy for $hash (recently not found), responding 404")
+                            return@get call.respond(HttpStatusCode.NotFound)
+                        }
+
                         Log.d(Morganite.TAG, "$hash not found locally. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
 
                         // Attempt retrieval from xs hints
@@ -599,6 +640,7 @@ class CustomHttpServer(
                         }
 
                         Log.d(Morganite.TAG, "Resource $hash not found on any server")
+                        markNotFound(cacheKey)
                         call.respond(HttpStatusCode.NotFound)
                     }
 
@@ -620,6 +662,13 @@ class CustomHttpServer(
                             // Blob not found locally → attempt proxy retrieval using BUD-10 hints
                             val xsServers = call.request.queryParameters.getAll("xs") ?: emptyList()
                             val authorPubkeys = call.request.queryParameters.getAll("as") ?: emptyList()
+
+                            val cacheKey = proxyCacheKey(hash, xsServers, authorPubkeys)
+                            if (isRecentlyNotFound(cacheKey)) {
+                                Log.d(Morganite.TAG, "Skipping proxy for $hash (recently not found), responding 404")
+                                call.respond(HttpStatusCode.NotFound)
+                                return@head
+                            }
 
                             Log.d(Morganite.TAG, "$hash not found locally for HEAD. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
 
@@ -645,6 +694,10 @@ class CustomHttpServer(
                                     }
                                     if (found) break
                                 }
+                            }
+
+                            if (file == null || !file.exists()) {
+                                markNotFound(cacheKey)
                             }
                         }
 

@@ -1,3 +1,11 @@
+## Morganite 0.0.4
+
+- Cache "not found" proxy results briefly so repeated requests for an unavailable blob no longer re-crawl every hint server and relay, saving battery while proxying
+
+Download it with [Zapstore](https://zapstore.dev/apps/com.greenart7c3.morganite), [Obtainium](https://github.com/ImranR98/Obtainium) or download it directly in the [releases page](https://github.com/greenart7c3/Morganite/releases/tag/v0.0.4)
+
+If you like my work consider making a [donation](https://greenart7c3.com)
+
 ## Morganite 0.0.3
 
 - Start Tor on demand and stop it when idle to save battery
