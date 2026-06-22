@@ -16,8 +16,10 @@ import com.greenart7c3.morganite.service.HttpServerService
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -36,10 +38,10 @@ class Morganite : Application() {
      * Last [LOG_VIEWER_LIMIT] log lines from the local database, oldest first so
      * the UI can auto-scroll to the most recent entry.
      */
-    val logs: Flow<List<String>> by lazy {
+    val logs: StateFlow<List<String>> by lazy {
         logDatabase.logDao().recent(LOG_VIEWER_LIMIT).map { entries ->
             entries.asReversed().map { it.format() }
-        }
+        }.stateIn(scope, SharingStarted.WhileSubscribed(5_000), emptyList())
     }
 
     override fun onCreate() {

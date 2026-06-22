@@ -60,7 +60,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val isRunning by Morganite.instance.httpServer.isRunning.collectAsStateWithLifecycle()
                     val settings by Morganite.instance.settingsManager.settings.collectAsStateWithLifecycle()
-                    val logStream by Morganite.instance.logs.collectAsStateWithLifecycle(initialValue = emptyList())
+                    val logStream by Morganite.instance.logs.collectAsStateWithLifecycle()
 
                     Column(
                         modifier = Modifier
