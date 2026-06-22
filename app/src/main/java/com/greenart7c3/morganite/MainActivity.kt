@@ -1,7 +1,6 @@
 package com.greenart7c3.morganite
 
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -41,16 +40,6 @@ import kotlinx.coroutines.launch
 import java.text.DecimalFormat
 
 class MainActivity : ComponentActivity() {
-    override fun onStart() {
-        super.onStart()
-        Morganite.instance.startLogStream()
-    }
-
-    override fun onStop() {
-        Morganite.instance.stopLogStream()
-        super.onStop()
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -58,8 +47,8 @@ class MainActivity : ComponentActivity() {
             MorganiteTheme {
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission(),
-                    onResult = { isGranted: Boolean ->
-                        Log.d("MainActivity", "Permission granted: $isGranted")
+                    onResult = { _: Boolean ->
+
                     }
                 )
 
@@ -70,7 +59,7 @@ class MainActivity : ComponentActivity() {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val isRunning by Morganite.instance.httpServer.isRunning.collectAsStateWithLifecycle()
                     val settings by Morganite.instance.settingsManager.settings.collectAsStateWithLifecycle()
-                    val logStream by Morganite.instance.logStream.collectAsStateWithLifecycle()
+                    val logStream by Morganite.instance.logs.collectAsStateWithLifecycle()
 
                     Column(
                         modifier = Modifier

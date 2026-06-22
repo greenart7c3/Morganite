@@ -6,6 +6,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
     alias(libs.plugins.gradle.ktlint) version (libs.versions.ktlint)
+    alias(libs.plugins.ksp)
 }
 
 android {
@@ -66,6 +67,7 @@ android {
     buildFeatures {
         compose = true
         resValues = true
+        buildConfig = true
     }
     packaging {
         resources {
@@ -108,4 +110,8 @@ dependencies {
     implementation(libs.tika.core)
     implementation(libs.quartz)
     implementation(libs.tor.android)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.room.ktx)
+    ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.work.runtime.ktx)
 }

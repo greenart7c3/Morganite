@@ -4,8 +4,8 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
-import android.util.Log
 import androidx.core.content.ContextCompat
+import com.greenart7c3.morganite.logs.MorganiteLog
 import com.greenart7c3.morganite.models.SettingsManager
 import com.greenart7c3.morganite.service.FileStore
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
@@ -99,17 +99,17 @@ class CustomHttpServer(
 
     private val torStatusReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            Log.d(Morganite.TAG, "Received Broadcast: ${intent?.action}")
+            MorganiteLog.d(Morganite.TAG, "Received Broadcast: ${intent?.action}")
             when (intent?.action) {
                 TorService.ACTION_STATUS -> {
                     val status = intent.getStringExtra(TorService.EXTRA_STATUS) ?: TorService.STATUS_OFF
-                    Log.d(Morganite.TAG, "Tor connection status: $status")
+                    MorganiteLog.d(Morganite.TAG, "Tor connection status: $status")
                     torStatus.value = status
                     updateClients()
                 }
                 TorService.ACTION_ERROR -> {
                     val error = intent.getStringExtra(Intent.EXTRA_TEXT)
-                    Log.e(Morganite.TAG, "Tor connection error: $error")
+                    MorganiteLog.e(Morganite.TAG, "Tor connection error: $error")
                 }
             }
         }
@@ -134,7 +134,7 @@ class CustomHttpServer(
                 // is brought up on demand by ensureTorReady(). We only need to tear
                 // it down here when the user turns the setting off.
                 if (!it.useTor && (torStatus.value != TorService.STATUS_OFF)) {
-                    Log.d(Morganite.TAG, "Tor disabled in settings, stopping service...")
+                    MorganiteLog.d(Morganite.TAG, "Tor disabled in settings, stopping service...")
                     torIdleJob?.cancel()
                     stopTor()
                 }
@@ -145,7 +145,7 @@ class CustomHttpServer(
 
     private fun updateClients() {
         val settings = settingsManager.settings.value
-        Log.d(Morganite.TAG, "Updating clients. useTor: ${settings.useTor}, status: ${torStatus.value}")
+        MorganiteLog.d(Morganite.TAG, "Updating clients. useTor: ${settings.useTor}, status: ${torStatus.value}")
 
         // Capture the clients we are about to replace so their idle connection
         // pools and dispatcher threads can be released afterwards. Without this,
@@ -166,7 +166,7 @@ class CustomHttpServer(
                 .build()
 
             rootClient = if (settings.useTorForAllUrls) {
-                Log.d(Morganite.TAG, "Routing all traffic through Tor proxy")
+                MorganiteLog.d(Morganite.TAG, "Routing all traffic through Tor proxy")
                 torClient
             } else {
                 OkHttpClient.Builder().build()
@@ -196,11 +196,11 @@ class CustomHttpServer(
 
     suspend fun start() {
         if (::server.isInitialized) {
-            Log.d(Morganite.TAG, "Server already initialized. Starting")
+            MorganiteLog.d(Morganite.TAG, "Server already initialized. Starting")
             server.startSuspend()
             return
         }
-        Log.d(Morganite.TAG, "Starting CustomHttpServer")
+        MorganiteLog.d(Morganite.TAG, "Starting CustomHttpServer")
         // Tor is started lazily on the first tor-routed request (see ensureTorReady).
         updateClients()
         server = startKtorHttpServer()
@@ -209,14 +209,14 @@ class CustomHttpServer(
     }
 
     private fun startTor() {
-        Log.d(Morganite.TAG, "Starting Tor Service via Intent")
+        MorganiteLog.d(Morganite.TAG, "Starting Tor Service via Intent")
         val intent = Intent(Morganite.instance, TorService::class.java)
         intent.action = TorService.ACTION_START
         Morganite.instance.startService(intent)
     }
 
     private fun stopTor() {
-        Log.d(Morganite.TAG, "Stopping Tor Service via Intent")
+        MorganiteLog.d(Morganite.TAG, "Stopping Tor Service via Intent")
         val intent = Intent(Morganite.instance, TorService::class.java)
         intent.action = TorService.ACTION_STOP
         Morganite.instance.startService(intent)
@@ -241,7 +241,7 @@ class CustomHttpServer(
                 true
             }
             if (ready == null) {
-                Log.w(Morganite.TAG, "Tor did not become ready within ${torBootstrapTimeoutMs}ms")
+                MorganiteLog.w(Morganite.TAG, "Tor did not become ready within ${torBootstrapTimeoutMs}ms")
             }
         }
     }
@@ -252,14 +252,14 @@ class CustomHttpServer(
         torIdleJob = Morganite.instance.scope.launch {
             delay(torIdleTimeoutMs)
             if (torUsers.get() == 0 && torStatus.value != TorService.STATUS_OFF) {
-                Log.d(Morganite.TAG, "Tor idle for ${torIdleTimeoutMs}ms, stopping it")
+                MorganiteLog.d(Morganite.TAG, "Tor idle for ${torIdleTimeoutMs}ms, stopping it")
                 stopTor()
             }
         }
     }
 
     suspend fun stop() {
-        Log.d(Morganite.TAG, "Stopping CustomHttpServer")
+        MorganiteLog.d(Morganite.TAG, "Stopping CustomHttpServer")
         server.stopSuspend()
         nostrClient.disconnect()
         torIdleJob?.cancel()
@@ -275,7 +275,7 @@ class CustomHttpServer(
     }
 
     suspend fun fetchInboxRelays(pubkey: String): List<NormalizedRelayUrl> {
-        Log.d(Morganite.TAG, "Fetching inbox relays for $pubkey")
+        MorganiteLog.d(Morganite.TAG, "Fetching inbox relays for $pubkey")
         val event = nostrClient.downloadFirstEvent(
             filters = fallbackRelays.associateWith {
                 listOf(
@@ -289,12 +289,12 @@ class CustomHttpServer(
         )
 
         val relays = (event as? AdvertisedRelayListEvent)?.readRelaysNorm() ?: emptyList()
-        Log.d(Morganite.TAG, "Found ${relays.size} inbox relays for $pubkey")
+        MorganiteLog.d(Morganite.TAG, "Found ${relays.size} inbox relays for $pubkey")
         return relays
     }
 
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
-        Log.d(Morganite.TAG, "Fetching author servers for $pubkey")
+        MorganiteLog.d(Morganite.TAG, "Fetching author servers for $pubkey")
         // The relay websocket is routed through Tor when the setting is on, so make
         // sure Tor is up first and count this as an active tor user.
         val needsTor = settingsManager.settings.value.useTor
@@ -321,13 +321,13 @@ class CustomHttpServer(
             )
 
             val servers = (event as? BlossomServersEvent)?.servers() ?: emptyList()
-            Log.d(Morganite.TAG, "Found ${servers.size} servers for $pubkey")
+            MorganiteLog.d(Morganite.TAG, "Found ${servers.size} servers for $pubkey")
             return servers
         } finally {
             // Close the relay socket once no lookup is still using it, so it does
             // not stay connected (and keep reconnecting) in the background.
             if (activeAuthorLookups.decrementAndGet() == 0) {
-                Log.d(Morganite.TAG, "No author lookups in flight, disconnecting nostr client")
+                MorganiteLog.d(Morganite.TAG, "No author lookups in flight, disconnecting nostr client")
                 nostrClient.disconnect()
             }
             if (needsTor && torUsers.decrementAndGet() == 0) {
@@ -343,7 +343,7 @@ class CustomHttpServer(
     ): Boolean {
         val url = buildUrl(server, hash, extension)
         val useTor = url.contains(".onion") || settingsManager.settings.value.useTorForAllUrls
-        Log.d(Morganite.TAG, "Attempting to fetch and save from $url (Use Tor: $useTor)")
+        MorganiteLog.d(Morganite.TAG, "Attempting to fetch and save from $url (Use Tor: $useTor)")
 
         val client = if (useTor) {
             torClient
@@ -374,7 +374,7 @@ class CustomHttpServer(
         return try {
             client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Log.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
+                    MorganiteLog.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
                     return false
                 }
 
@@ -390,16 +390,16 @@ class CustomHttpServer(
                     }
 
                     fileStore.moveFile(tempFile, hash)
-                    Log.d(Morganite.TAG, "Successfully saved $hash from $url")
+                    MorganiteLog.d(Morganite.TAG, "Successfully saved $hash from $url")
                     true
                 } catch (e: Exception) {
-                    Log.e(Morganite.TAG, "Error while saving from $url", e)
+                    MorganiteLog.e(Morganite.TAG, "Error while saving from $url", e)
                     if (tempFile.exists()) tempFile.delete()
                     false
                 }
             }
         } catch (e: Exception) {
-            Log.e(Morganite.TAG, "Network error fetching from $url", e)
+            MorganiteLog.e(Morganite.TAG, "Network error fetching from $url", e)
             false
         }
     }
@@ -412,7 +412,7 @@ class CustomHttpServer(
     ): Boolean {
         val url = buildUrl(server, hash, extension)
         val useTor = url.contains(".onion") || settingsManager.settings.value.useTorForAllUrls
-        Log.d(Morganite.TAG, "Attempting to fetch and stream from $url (Use Tor: $useTor)")
+        MorganiteLog.d(Morganite.TAG, "Attempting to fetch and stream from $url (Use Tor: $useTor)")
 
         val client = if (useTor) {
             torClient
@@ -444,7 +444,7 @@ class CustomHttpServer(
         return try {
             client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
-                    Log.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
+                    MorganiteLog.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
                     return false // Try next server
                 }
 
@@ -477,10 +477,10 @@ class CustomHttpServer(
 
                     // Finalize
                     fileStore.moveFile(tempFile, hash)
-                    Log.d(Morganite.TAG, "Successfully streamed and saved $hash from $url")
+                    MorganiteLog.d(Morganite.TAG, "Successfully streamed and saved $hash from $url")
                     true // Signal SUCCESS to the loop
                 } catch (e: Exception) {
-                    Log.e(Morganite.TAG, "Error while streaming from $url", e)
+                    MorganiteLog.e(Morganite.TAG, "Error while streaming from $url", e)
                     if (tempFile.exists()) tempFile.delete()
 
                     // If the user (the client) disconnected, throw to stop everything
@@ -491,7 +491,7 @@ class CustomHttpServer(
                 }
             }
         } catch (e: Exception) {
-            Log.e(Morganite.TAG, "Network error fetching from $url", e)
+            MorganiteLog.e(Morganite.TAG, "Network error fetching from $url", e)
             false // Connection error, return false to try next server
         }
     }
@@ -499,12 +499,12 @@ class CustomHttpServer(
     fun startMonitoring() {
         server.application.monitor.subscribe(ApplicationStarted) {
             isRunning.value = true
-            Log.d(Morganite.TAG, "Server started")
+            MorganiteLog.d(Morganite.TAG, "Server started")
         }
 
         server.application.monitor.subscribe(ApplicationStopped) {
             isRunning.value = false
-            Log.d(Morganite.TAG, "Server stopped")
+            MorganiteLog.d(Morganite.TAG, "Server stopped")
         }
     }
 
@@ -544,10 +544,10 @@ class CustomHttpServer(
 
                     get {
                         val path = call.request.path() // e.g., "/b1674...f553.pdf"
-                        Log.d(Morganite.TAG, "GET request: $path")
+                        MorganiteLog.d(Morganite.TAG, "GET request: $path")
                         val regex = Regex("([0-9a-f]{64})(\\.[a-z0-9]+)?")
                         val match = regex.find(path) ?: run {
-                            Log.d(Morganite.TAG, "Invalid SHA-256 hash in path: $path")
+                            MorganiteLog.d(Morganite.TAG, "Invalid SHA-256 hash in path: $path")
                             return@get call.respond(HttpStatusCode.BadRequest, "Invalid SHA-256 hash")
                         }
 
@@ -561,13 +561,13 @@ class CustomHttpServer(
                             val hashETag = "\"$hash\""
 
                             if (clientETag == hashETag) {
-                                Log.d(Morganite.TAG, "Serving $hash (Not Modified)")
+                                MorganiteLog.d(Morganite.TAG, "Serving $hash (Not Modified)")
                                 call.respond(HttpStatusCode.NotModified)
                                 return@get
                             }
 
                             val mimeType = fileStore.detectMimeType(file)
-                            Log.d(Morganite.TAG, "Serving $hash from local storage ($mimeType)")
+                            MorganiteLog.d(Morganite.TAG, "Serving $hash from local storage ($mimeType)")
                             call.respondFile(file) {
                                 call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
                                 call.response.headers.appendIfAbsent(HttpHeaders.ETag, hash)
@@ -579,11 +579,11 @@ class CustomHttpServer(
                         val xsServers = call.request.queryParameters.getAll("xs") ?: emptyList()
                         val authorPubkeys = call.request.queryParameters.getAll("as") ?: emptyList()
 
-                        Log.d(Morganite.TAG, "$hash not found locally. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
+                        MorganiteLog.d(Morganite.TAG, "$hash not found locally. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
 
                         // Attempt retrieval from xs hints
                         for (server in xsServers) {
-                            Log.d(Morganite.TAG, "Trying xs hint server: $server")
+                            MorganiteLog.d(Morganite.TAG, "Trying xs hint server: $server")
                             val success = tryFetchAndStream(server, hash, extension, call)
                             if (success) return@get // Exit the route on first success
                         }
@@ -592,22 +592,22 @@ class CustomHttpServer(
                         for (pubkey in authorPubkeys) {
                             val servers = fetchAuthorServers(pubkey) // BUD-03 kind:10063
                             for (server in servers) {
-                                Log.d(Morganite.TAG, "Trying author server: $server for $pubkey")
+                                MorganiteLog.d(Morganite.TAG, "Trying author server: $server for $pubkey")
                                 val success = tryFetchAndStream(server, hash, extension, call)
                                 if (success) return@get // Exit the route on first success
                             }
                         }
 
-                        Log.d(Morganite.TAG, "Resource $hash not found on any server")
+                        MorganiteLog.d(Morganite.TAG, "Resource $hash not found on any server")
                         call.respond(HttpStatusCode.NotFound)
                     }
 
                     head {
                         val path = call.request.path()
-                        Log.d(Morganite.TAG, "HEAD request: $path")
+                        MorganiteLog.d(Morganite.TAG, "HEAD request: $path")
                         val regex = Regex("([0-9a-f]{64})(\\.[a-z0-9]+)?")
                         val match = regex.find(path) ?: run {
-                            Log.d(Morganite.TAG, "Invalid SHA-256 hash in path: $path")
+                            MorganiteLog.d(Morganite.TAG, "Invalid SHA-256 hash in path: $path")
                             call.respond(HttpStatusCode.BadRequest)
                             return@head
                         }
@@ -621,10 +621,10 @@ class CustomHttpServer(
                             val xsServers = call.request.queryParameters.getAll("xs") ?: emptyList()
                             val authorPubkeys = call.request.queryParameters.getAll("as") ?: emptyList()
 
-                            Log.d(Morganite.TAG, "$hash not found locally for HEAD. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
+                            MorganiteLog.d(Morganite.TAG, "$hash not found locally for HEAD. Attempting proxy (xs: ${xsServers.size}, as: ${authorPubkeys.size})")
 
                             for (server in xsServers) {
-                                Log.d(Morganite.TAG, "Trying xs hint server: $server")
+                                MorganiteLog.d(Morganite.TAG, "Trying xs hint server: $server")
                                 if (tryFetchAndSave(server, hash, extension)) {
                                     file = fileStore.getFileByHash(hash)
                                     break
@@ -636,7 +636,7 @@ class CustomHttpServer(
                                     val servers = fetchAuthorServers(pubkey)
                                     var found = false
                                     for (server in servers) {
-                                        Log.d(Morganite.TAG, "Trying author server: $server for $pubkey")
+                                        MorganiteLog.d(Morganite.TAG, "Trying author server: $server for $pubkey")
                                         if (tryFetchAndSave(server, hash, extension)) {
                                             file = fileStore.getFileByHash(hash)
                                             found = true
@@ -649,13 +649,13 @@ class CustomHttpServer(
                         }
 
                         if (file == null || !file.exists()) {
-                            Log.d(Morganite.TAG, "File not found for hash: $hash")
+                            MorganiteLog.d(Morganite.TAG, "File not found for hash: $hash")
                             call.respond(HttpStatusCode.NotFound)
                             return@head
                         }
 
                         val mimeType = fileStore.detectMimeType(file)
-                        Log.d(Morganite.TAG, "HEAD response for $hash: $mimeType, ${file.length()} bytes")
+                        MorganiteLog.d(Morganite.TAG, "HEAD response for $hash: $mimeType, ${file.length()} bytes")
 
                         call.response.status(HttpStatusCode.OK)
                         call.response.headers.appendIfAbsent(HttpHeaders.ContentType, mimeType)
