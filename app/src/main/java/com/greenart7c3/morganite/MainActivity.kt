@@ -35,7 +35,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.greenart7c3.morganite.logs.MorganiteLog
 import com.greenart7c3.morganite.ui.theme.MorganiteTheme
 import kotlinx.coroutines.launch
 import java.text.DecimalFormat
@@ -48,8 +47,8 @@ class MainActivity : ComponentActivity() {
             MorganiteTheme {
                 val permissionLauncher = rememberLauncherForActivityResult(
                     contract = ActivityResultContracts.RequestPermission(),
-                    onResult = { isGranted: Boolean ->
-                        MorganiteLog.d("MainActivity", "Permission granted: $isGranted")
+                    onResult = { _: Boolean ->
+
                     }
                 )
 
