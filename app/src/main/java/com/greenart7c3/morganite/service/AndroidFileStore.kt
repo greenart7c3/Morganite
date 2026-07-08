@@ -17,15 +17,22 @@ class AndroidFileStore(
 
     private val blobDir = File(context.filesDir, "blobs")
 
+    // Guards writes/deletes and the tracked size so concurrent downloads
+    // don't race each other or the pruner.
+    private val lock = Any()
+
+    // Detecting a MIME type happens on every served blob and constructing a Tika
+    // instance loads the whole MIME-type registry, so build it once.
+    private val tika = Tika()
+
     private val _size = MutableStateFlow(0L)
     override val size: StateFlow<Long> = _size.asStateFlow()
 
     init {
         blobDir.mkdirs()
-        updateSize()
-    }
-
-    private fun updateSize() {
+        // The directory is scanned once here; afterwards the size is maintained
+        // incrementally so saving a blob no longer stats every cached file
+        // (previously two full scans per download: pruneIfNeeded + updateSize).
         _size.value = blobDir.listFiles()?.sumOf { it.length() } ?: 0L
     }
 
@@ -44,28 +51,33 @@ class AndroidFileStore(
         val hash = sha256(bytes)
         val file = File(blobDir, hash)
 
-        if (!file.exists()) {
-            file.writeBytes(bytes)
-        } else {
-            file.setLastModified(System.currentTimeMillis())
+        synchronized(lock) {
+            if (!file.exists()) {
+                file.writeBytes(bytes)
+                _size.value += bytes.size
+                pruneIfNeeded()
+            } else {
+                file.setLastModified(System.currentTimeMillis())
+            }
         }
-
-        pruneIfNeeded()
-        updateSize()
 
         return hash
     }
 
     override fun moveFile(tempFile: File, hash: String) {
         try {
-            // ATOMIC_MOVE is faster but might fail if moving across different drives
-            Files.move(
-                tempFile.toPath(),
-                File(blobDir, hash).toPath(),
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-            pruneIfNeeded()
-            updateSize()
+            val incomingSize = tempFile.length()
+            synchronized(lock) {
+                val target = File(blobDir, hash)
+                val replacedSize = if (target.exists()) target.length() else 0L
+                Files.move(
+                    tempFile.toPath(),
+                    target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+                _size.value += incomingSize - replacedSize
+                pruneIfNeeded()
+            }
         } catch (e: IOException) {
             // Fallback: If move fails, ensure we clean up the temp file
             if (tempFile.exists()) tempFile.delete()
@@ -79,30 +91,38 @@ class AndroidFileStore(
     }
 
     override fun detectMimeType(file: File): String {
-        val tika = Tika()
         return tika.detect(file)
     }
 
     override fun clear() {
-        blobDir.listFiles()?.forEach { it.delete() }
-        updateSize()
+        synchronized(lock) {
+            blobDir.listFiles()?.forEach { it.delete() }
+            _size.value = 0L
+        }
     }
 
+    // Must be called while holding [lock]. The directory is only listed when the
+    // tracked size actually crosses the limit, instead of on every single save;
+    // the fresh listing also re-syncs the tracked size in case it drifted.
     private fun pruneIfNeeded() {
-        val files = blobDir.listFiles() ?: return
-        val currentSize = files.sumOf { it.length() }
-        if (currentSize <= 1024L * 1024L * 1024L) return
+        if (_size.value <= MAX_CACHE_SIZE_BYTES) return
 
+        val files = blobDir.listFiles() ?: return
+        var remainingSize = files.sumOf { it.length() }
         val sortedFiles = files.sortedBy { it.lastModified() }
-        var remainingSize = currentSize
-        val targetSize = 850L * 1024L * 1024L
 
         for (file in sortedFiles) {
-            if (remainingSize <= targetSize) break
+            if (remainingSize <= PRUNE_TARGET_SIZE_BYTES) break
             val fileSize = file.length()
             if (file.delete()) {
                 remainingSize -= fileSize
             }
         }
+        _size.value = remainingSize
+    }
+
+    companion object {
+        private const val MAX_CACHE_SIZE_BYTES = 1024L * 1024L * 1024L
+        private const val PRUNE_TARGET_SIZE_BYTES = 850L * 1024L * 1024L
     }
 }
