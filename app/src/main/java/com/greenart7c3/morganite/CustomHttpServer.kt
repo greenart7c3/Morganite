@@ -41,6 +41,7 @@ import io.ktor.server.routing.options
 import io.ktor.server.routing.route
 import io.ktor.server.routing.routing
 import kotlinx.coroutines.DelicateCoroutinesApi
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -49,6 +50,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -58,6 +60,23 @@ import java.net.InetSocketAddress
 import java.net.Proxy
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
+
+// Downloads are copied (and hashed) in chunks of this size. The old 8 KiB buffer
+// meant ~8x more loop iterations, stream syscalls and digest calls per blob than
+// necessary, which is CPU time (battery) spent per megabyte downloaded.
+private const val COPY_BUFFER_SIZE = 64 * 1024
+
+private val HEX_DIGITS = "0123456789abcdef".toCharArray()
+
+private fun ByteArray.toHex(): String {
+    val out = CharArray(size * 2)
+    for (i in indices) {
+        val b = this[i].toInt() and 0xff
+        out[i * 2] = HEX_DIGITS[b ushr 4]
+        out[i * 2 + 1] = HEX_DIGITS[b and 0x0f]
+    }
+    return String(out)
+}
 
 class CustomHttpServer(
     val fileStore: FileStore,
@@ -358,7 +377,7 @@ class CustomHttpServer(
         }
         try {
             if (needsTor) ensureTorReady()
-            return fetchAndSaveBlocking(client, url, hash)
+            return fetchAndSave(client, url, hash)
         } finally {
             if (needsTor && torUsers.decrementAndGet() == 0) {
                 scheduleTorIdleStop()
@@ -366,16 +385,19 @@ class CustomHttpServer(
         }
     }
 
-    private fun fetchAndSaveBlocking(
+    // Runs on Dispatchers.IO: OkHttp's execute() and the stream copy are blocking,
+    // and parking a Ktor CIO event-loop thread on them stalls every other request
+    // the server is handling for the duration of the download.
+    private suspend fun fetchAndSave(
         client: OkHttpClient,
         url: String,
         hash: String,
-    ): Boolean {
-        return try {
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
             client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
                     MorganiteLog.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
-                    return false
+                    return@withContext false
                 }
 
                 val body = response.body
@@ -383,10 +405,27 @@ class CustomHttpServer(
                 val tempFile = File.createTempFile("download-", ".tmp")
 
                 try {
+                    // Hash while the bytes are already in hand instead of re-reading
+                    // the finished file from flash for verification — one pass over
+                    // the data instead of two.
+                    val digest = MessageDigest.getInstance("SHA-256")
                     body.byteStream().use { inputStream ->
                         tempFile.outputStream().use { fileOut ->
-                            inputStream.copyTo(fileOut)
+                            val buffer = ByteArray(COPY_BUFFER_SIZE)
+                            while (true) {
+                                val bytesRead = inputStream.read(buffer)
+                                if (bytesRead == -1) break
+                                digest.update(buffer, 0, bytesRead)
+                                fileOut.write(buffer, 0, bytesRead)
+                            }
                         }
+                    }
+
+                    val actualHash = digest.digest().toHex()
+                    if (actualHash != hash) {
+                        MorganiteLog.w(Morganite.TAG, "Hash mismatch from $url: expected $hash but got $actualHash")
+                        tempFile.delete()
+                        return@withContext false
                     }
 
                     fileStore.moveFile(tempFile, hash)
@@ -435,17 +474,20 @@ class CustomHttpServer(
         }
     }
 
+    // Runs on Dispatchers.IO: OkHttp's execute() and the copy loop inside
+    // respondOutputStream are blocking, and parking a Ktor CIO event-loop thread
+    // on them stalls every other request the server is handling.
     private suspend fun streamFromServer(
         client: OkHttpClient,
         url: String,
         hash: String,
         call: ApplicationCall,
-    ): Boolean {
-        return try {
+    ): Boolean = withContext(Dispatchers.IO) {
+        try {
             client.newCall(Request.Builder().url(url).build()).execute().use { response ->
                 if (!response.isSuccessful) {
                     MorganiteLog.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
-                    return false // Try next server
+                    return@withContext false // Try next server
                 }
 
                 val body = response.body
@@ -460,11 +502,12 @@ class CustomHttpServer(
                 }
 
                 try {
-                    // Ktor streaming
+                    // Ktor streaming; the digest is fed in the same pass so the
+                    // blob never has to be re-read from flash to verify it.
                     call.respondOutputStream(contentType, HttpStatusCode.fromValue(response.code)) {
                         body.byteStream().use { inputStream ->
                             tempFile.outputStream().use { fileOut ->
-                                val buffer = ByteArray(8192)
+                                val buffer = ByteArray(COPY_BUFFER_SIZE)
                                 var bytesRead: Int
                                 while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                                     digest.update(buffer, 0, bytesRead)
@@ -475,9 +518,20 @@ class CustomHttpServer(
                         }
                     }
 
-                    // Finalize
-                    fileStore.moveFile(tempFile, hash)
-                    MorganiteLog.d(Morganite.TAG, "Successfully streamed and saved $hash from $url")
+                    // Finalize. Only cache the blob if its content matches the hash
+                    // it was requested under; caching a corrupt/forged blob would
+                    // serve bad data forever and make clients re-download it from
+                    // remote servers over and over. The response has already been
+                    // streamed to the client at this point, so on mismatch we still
+                    // return true — there is no way to retry another server.
+                    val actualHash = digest.digest().toHex()
+                    if (actualHash != hash) {
+                        MorganiteLog.w(Morganite.TAG, "Hash mismatch from $url: expected $hash but got $actualHash, not caching")
+                        tempFile.delete()
+                    } else {
+                        fileStore.moveFile(tempFile, hash)
+                        MorganiteLog.d(Morganite.TAG, "Successfully streamed and saved $hash from $url")
+                    }
                     true // Signal SUCCESS to the loop
                 } catch (e: Exception) {
                     MorganiteLog.e(Morganite.TAG, "Error while streaming from $url", e)
