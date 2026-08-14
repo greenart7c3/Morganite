@@ -1,13 +1,15 @@
 ## Morganite 0.0.4
 
+- Verify blob hashes during download in a single pass before caching
+- Track cache size incrementally to avoid directory rescans on every blob save
+- Increase buffer sizes and move blocking network calls to I/O threads for better performance
+- Reuse Tika instances for faster MIME-type detection
 - Persist logs to a local Room database instead of logcat
 - Expose logs as StateFlow for the log viewer
 - Remove permission result logging in MainActivity
 - Update deployment target selection state in IDE configuration
 
 Download it with [Zapstore](https://zapstore.dev/apps/com.greenart7c3.morganite), [Obtainium](https://github.com/ImranR98/Obtainium) or download it directly in the [releases page](https://github.com/greenart7c3/Morganite/releases/tag/v0.0.4)
-
-If you like my work consider making a [donation](https://greenart7c3.com)
 
 ### Verifying the release
 
