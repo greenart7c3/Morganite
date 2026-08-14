@@ -1,3 +1,34 @@
+## Morganite 0.0.4
+
+- Persist logs to a local Room database instead of logcat
+- Expose logs as StateFlow for the log viewer
+- Remove permission result logging in MainActivity
+- Update deployment target selection state in IDE configuration
+
+Download it with [Zapstore](https://zapstore.dev/apps/com.greenart7c3.morganite), [Obtainium](https://github.com/ImranR98/Obtainium) or download it directly in the [releases page](https://github.com/greenart7c3/Morganite/releases/tag/v0.0.4)
+
+If you like my work consider making a [donation](https://greenart7c3.com)
+
+### Verifying the release
+
+In order to verify the release, you'll need to have `gpg` or `gpg2` installed on your system. Once you've obtained a copy (and hopefully verified that as well), you'll first need to import the keys that have signed this release if you haven't done so already:
+
+``` bash
+gpg --keyserver hkps://keys.openpgp.org --recv-keys 44F0AAEB77F373747E3D5444885822EED3A26A6D
+```
+
+Once you have his PGP key you can verify the release (assuming `manifest-v0.0.4.txt` and `manifest-v0.0.4.txt.sig` are in the current directory) with:
+
+``` bash
+gpg --verify manifest-v0.0.4.txt.sig manifest-v0.0.4.txt
+```
+
+That will verify the signature on the main manifest page which ensures integrity and authenticity of the binaries you've downloaded locally. Next, depending on your operating system you should then re-calculate the sha256 sum of the binary, and compare that with the following hashes:
+
+``` bash
+cat manifest-v0.0.4.txt
+```
+
 ## Morganite 0.0.3
 
 - Start Tor on demand and stop it when idle to save battery
@@ -14,7 +45,7 @@ Download it with [Zapstore](https://zapstore.dev/apps/com.greenart7c3.morganite)
 
 If you like my work consider making a [donation](https://greenart7c3.com)
 
-## Verifying the release
+### Verifying the release
 
 In order to verify the release, you'll need to have `gpg` or `gpg2` installed on your system. Once you've obtained a copy (and hopefully verified that as well), you'll first need to import the keys that have signed this release if you haven't done so already:
 
