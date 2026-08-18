@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- Cleartext stays blocked everywhere (default for targetSdk >= 28)... -->
+    <base-config cleartextTrafficPermitted="false" />
+    <!-- ...except for .onion hosts. Onion services are reached through the Tor
+         SOCKS proxy, where Tor provides end-to-end encryption and the onion
+         address authenticates the server, and most of them only speak plain
+         HTTP, so http:// would otherwise be rejected by OkHttp. -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="true">onion</domain>
+    </domain-config>
+</network-security-config>

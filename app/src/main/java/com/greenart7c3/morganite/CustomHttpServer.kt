@@ -288,9 +288,14 @@ class CustomHttpServer(
     }
 
     fun buildUrl(server: String, hash: String, extension: String): String {
-        val s = if (server.startsWith("http://") || server.startsWith("https://")) server
-        else "https://$server"
-        return "$s/$hash$extension"
+        // Onion services rarely serve TLS (Tor itself encrypts and authenticates
+        // the connection), so scheme-less .onion servers must default to http://.
+        val scheme = when {
+            server.startsWith("http://") || server.startsWith("https://") -> ""
+            server.contains(".onion") -> "http://"
+            else -> "https://"
+        }
+        return "$scheme$server/$hash$extension"
     }
 
     suspend fun fetchInboxRelays(pubkey: String): List<NormalizedRelayUrl> {
