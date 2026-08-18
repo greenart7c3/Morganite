@@ -43,7 +43,6 @@ import io.ktor.server.routing.routing
 import kotlinx.coroutines.DelicateCoroutinesApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
@@ -58,7 +57,9 @@ import org.torproject.jni.TorService
 import java.io.File
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.SocketTimeoutException
 import java.security.MessageDigest
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
 // Downloads are copied (and hashed) in chunks of this size. The old 8 KiB buffer
@@ -66,7 +67,41 @@ import java.util.concurrent.atomic.AtomicInteger
 // necessary, which is CPU time (battery) spent per megabyte downloaded.
 private const val COPY_BUFFER_SIZE = 64 * 1024
 
+// Tor needs far more patience than OkHttp's 10s defaults. For an .onion URL the
+// SOCKS CONNECT only completes after Tor has built a circuit and finished the
+// rendezvous handshake with the hidden service (typically 6 hops total, easily
+// 10-30s, longer on cold mobile connections), so a short connect timeout fails
+// before Tor even finishes. The call timeout only bounds runaway stalls — a
+// healthy download should never reach it.
+private const val TOR_CONNECT_TIMEOUT_MS = 60_000L
+private const val TOR_READ_TIMEOUT_MS = 60_000L
+private const val TOR_CALL_TIMEOUT_MS = 5 * 60_000L
+
+// A timed-out fetch is retried once per server before giving up on it and moving
+// to the next server. Only timeouts that happen before anything was sent to the
+// local client are retried (see RetryableTimeoutException).
+private const val MAX_FETCH_ATTEMPTS = 2
+private const val RETRY_DELAY_MS = 1_000L
+
 private val HEX_DIGITS = "0123456789abcdef".toCharArray()
+
+/** A fetch timed out before anything was sent to the local client, so the attempt can be retried. */
+private class RetryableTimeoutException(cause: Throwable) : Exception(cause)
+
+/**
+ * True when this failure (or any of its causes) is a timeout. OkHttp surfaces its
+ * connect/read/call timeouts as [SocketTimeoutException]; HTTP/2 stream timeouts
+ * come from OkHttp's internal StreamTimeoutException.
+ */
+private fun Throwable.isTimeout(): Boolean {
+    var t: Throwable? = this
+    while (t != null) {
+        if (t is SocketTimeoutException) return true
+        if (t::class.java.simpleName == "StreamTimeoutException") return true
+        t = t.cause
+    }
+    return false
+}
 
 private fun ByteArray.toHex(): String {
     val out = CharArray(size * 2)
@@ -104,16 +139,15 @@ class CustomHttpServer(
     // background — the main source of battery drain while the app is idle.
     private val activeAuthorLookups = AtomicInteger(0)
 
-    // Tor is started on demand (only when a fetch actually needs to be routed
-    // through it) and stopped again after a period of inactivity. Running Tor
-    // continuously keeps the radio awake with circuit/padding traffic and is the
-    // biggest battery drain when the setting is enabled. torUsers counts the
-    // tor-routed operations currently in flight; when it drops to zero we arm
-    // torIdleJob to stop Tor after torIdleTimeoutMs.
-    private val torUsers = AtomicInteger(0)
-    private var torIdleJob: Job? = null
+    // Tor is started at app startup when the setting is enabled (so the first
+    // tor-routed request doesn't pay the cold-bootstrap latency) and restarted on
+    // demand by ensureTorReady() if it is ever found off. It is never stopped
+    // automatically: it keeps running (and keeps its circuits warm) until the
+    // user disables the setting or stops the server. The battery trade-off of
+    // always-on Tor is accepted in exchange for instantly-available fetches —
+    // every cold Tor start would otherwise re-add the circuit-build/rendezvous
+    // latency that used to cause fetch timeouts.
     private val torStartMutex = Mutex()
-    private val torIdleTimeoutMs = 5 * 60 * 1000L
     private val torBootstrapTimeoutMs = 60 * 1000L
 
     private val torStatusReceiver = object : BroadcastReceiver() {
@@ -123,8 +157,11 @@ class CustomHttpServer(
                 TorService.ACTION_STATUS -> {
                     val status = intent.getStringExtra(TorService.EXTRA_STATUS) ?: TorService.STATUS_OFF
                     MorganiteLog.d(Morganite.TAG, "Tor connection status: $status")
-                    torStatus.value = status
+                    // Rebuild the clients (they pick up TorService.socksPort) before
+                    // the status flow flips: a waiter resumed by torStatus would
+                    // otherwise grab a client still pointing at the default-port guess.
                     updateClients()
+                    torStatus.value = status
                 }
                 TorService.ACTION_ERROR -> {
                     val error = intent.getStringExtra(Intent.EXTRA_TEXT)
@@ -148,13 +185,22 @@ class CustomHttpServer(
         )
 
         Morganite.instance.scope.launch {
+            // The settings StateFlow emits its current value on collect, so the
+            // first iteration here (previousUseTor == null) is effectively "app
+            // startup": if Tor was left enabled, it is brought up immediately.
+            // Later emissions only act on actual transitions of useTor — toggling
+            // an unrelated setting must not resurrect Tor after an idle stop.
+            var previousUseTor: Boolean? = null
             settingsManager.settings.collect {
-                // Tor is no longer started eagerly when the setting is enabled; it
-                // is brought up on demand by ensureTorReady(). We only need to tear
-                // it down here when the user turns the setting off.
+                if (it.useTor && previousUseTor != it.useTor && torStatus.value == TorService.STATUS_OFF) {
+                    MorganiteLog.d(Morganite.TAG, "Tor enabled, starting service")
+                    startTor()
+                }
+                previousUseTor = it.useTor
+                // Tor is never stopped automatically; disabling the setting is an
+                // explicit user action and the only thing that tears it down.
                 if (!it.useTor && (torStatus.value != TorService.STATUS_OFF)) {
                     MorganiteLog.d(Morganite.TAG, "Tor disabled in settings, stopping service...")
-                    torIdleJob?.cancel()
                     stopTor()
                 }
                 updateClients()
@@ -182,6 +228,9 @@ class CustomHttpServer(
             // This ensures no leaks for .onion even during bootstrap
             torClient = OkHttpClient.Builder()
                 .proxy(torProxy)
+                .connectTimeout(TOR_CONNECT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .readTimeout(TOR_READ_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                .callTimeout(TOR_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                 .build()
 
             rootClient = if (settings.useTorForAllUrls) {
@@ -220,7 +269,8 @@ class CustomHttpServer(
             return
         }
         MorganiteLog.d(Morganite.TAG, "Starting CustomHttpServer")
-        // Tor is started lazily on the first tor-routed request (see ensureTorReady).
+        // Tor is started eagerly by the settings collector in init (initial
+        // emission of the settings flow) and restarted on demand by ensureTorReady.
         updateClients()
         server = startKtorHttpServer()
         startMonitoring()
@@ -265,23 +315,11 @@ class CustomHttpServer(
         }
     }
 
-    /** Arm a timer to stop Tor once it has been idle (no tor-routed work) long enough. */
-    private fun scheduleTorIdleStop() {
-        torIdleJob?.cancel()
-        torIdleJob = Morganite.instance.scope.launch {
-            delay(torIdleTimeoutMs)
-            if (torUsers.get() == 0 && torStatus.value != TorService.STATUS_OFF) {
-                MorganiteLog.d(Morganite.TAG, "Tor idle for ${torIdleTimeoutMs}ms, stopping it")
-                stopTor()
-            }
-        }
-    }
-
     suspend fun stop() {
         MorganiteLog.d(Morganite.TAG, "Stopping CustomHttpServer")
         server.stopSuspend()
         nostrClient.disconnect()
-        torIdleJob?.cancel()
+        // User pressed "Stop" — explicit action, so Tor is torn down here too.
         if (torStatus.value != TorService.STATUS_OFF) {
             stopTor()
         }
@@ -320,12 +358,8 @@ class CustomHttpServer(
     suspend fun fetchAuthorServers(pubkey: String): List<String> {
         MorganiteLog.d(Morganite.TAG, "Fetching author servers for $pubkey")
         // The relay websocket is routed through Tor when the setting is on, so make
-        // sure Tor is up first and count this as an active tor user.
+        // sure Tor is up first.
         val needsTor = settingsManager.settings.value.useTor
-        if (needsTor) {
-            torIdleJob?.cancel()
-            torUsers.incrementAndGet()
-        }
         activeAuthorLookups.incrementAndGet()
         try {
             if (needsTor) ensureTorReady()
@@ -354,9 +388,6 @@ class CustomHttpServer(
                 MorganiteLog.d(Morganite.TAG, "No author lookups in flight, disconnecting nostr client")
                 nostrClient.disconnect()
             }
-            if (needsTor && torUsers.decrementAndGet() == 0) {
-                scheduleTorIdleStop()
-            }
         }
     }
 
@@ -369,23 +400,43 @@ class CustomHttpServer(
         val useTor = url.contains(".onion") || settingsManager.settings.value.useTorForAllUrls
         MorganiteLog.d(Morganite.TAG, "Attempting to fetch and save from $url (Use Tor: $useTor)")
 
-        val client = if (useTor) {
-            torClient
-        } else {
-            rootClient
-        }
-
         val needsTor = settingsManager.settings.value.useTor && useTor
-        if (needsTor) {
-            torIdleJob?.cancel()
-            torUsers.incrementAndGet()
+        return fetchWithRetry(url, needsTor, useTor) { client ->
+            fetchAndSave(client, url, hash)
         }
-        try {
+    }
+
+    /**
+     * Runs a fetch, retrying it when it fails with a timeout before anything was
+     * sent to the local client. A timeout on a Tor-routed request usually means
+     * the circuit/rendezvous to the onion service was not established in time,
+     * and a second attempt frequently succeeds once Tor has a warm circuit, so
+     * each server gets up to [MAX_FETCH_ATTEMPTS] attempts before the caller
+     * moves on to the next server. Non-timeout failures are not retried.
+     */
+    private suspend fun fetchWithRetry(
+        url: String,
+        needsTor: Boolean,
+        useTor: Boolean,
+        fetch: suspend (OkHttpClient) -> Boolean,
+    ): Boolean {
+        var attempt = 1
+        while (true) {
+            // Re-check Tor readiness and re-pick the client on every attempt: if
+            // the first try raced Tor's bootstrap, the retry gets a client built
+            // with the real SOCKS port instead of the default-port guess.
             if (needsTor) ensureTorReady()
-            return fetchAndSave(client, url, hash)
-        } finally {
-            if (needsTor && torUsers.decrementAndGet() == 0) {
-                scheduleTorIdleStop()
+            val client = if (useTor) torClient else rootClient
+            try {
+                return fetch(client)
+            } catch (e: RetryableTimeoutException) {
+                if (attempt >= MAX_FETCH_ATTEMPTS) {
+                    MorganiteLog.w(Morganite.TAG, "Fetch from $url timed out $attempt times, giving up on this server")
+                    return false
+                }
+                attempt++
+                MorganiteLog.d(Morganite.TAG, "Fetch from $url timed out, retrying (attempt $attempt of $MAX_FETCH_ATTEMPTS)")
+                delay(RETRY_DELAY_MS)
             }
         }
     }
@@ -439,11 +490,16 @@ class CustomHttpServer(
                 } catch (e: Exception) {
                     MorganiteLog.e(Morganite.TAG, "Error while saving from $url", e)
                     if (tempFile.exists()) tempFile.delete()
+                    // Nothing was sent to the local client, so a timeout is worth a retry.
+                    if (e.isTimeout()) throw RetryableTimeoutException(e)
                     false
                 }
             }
+        } catch (e: RetryableTimeoutException) {
+            throw e // Already handled below the fold; let the retry wrapper see it.
         } catch (e: Exception) {
             MorganiteLog.e(Morganite.TAG, "Network error fetching from $url", e)
+            if (e.isTimeout()) throw RetryableTimeoutException(e)
             false
         }
     }
@@ -458,24 +514,9 @@ class CustomHttpServer(
         val useTor = url.contains(".onion") || settingsManager.settings.value.useTorForAllUrls
         MorganiteLog.d(Morganite.TAG, "Attempting to fetch and stream from $url (Use Tor: $useTor)")
 
-        val client = if (useTor) {
-            torClient
-        } else {
-            rootClient
-        }
-
         val needsTor = settingsManager.settings.value.useTor && useTor
-        if (needsTor) {
-            torIdleJob?.cancel()
-            torUsers.incrementAndGet()
-        }
-        try {
-            if (needsTor) ensureTorReady()
-            return streamFromServer(client, url, hash, call)
-        } finally {
-            if (needsTor && torUsers.decrementAndGet() == 0) {
-                scheduleTorIdleStop()
-            }
+        return fetchWithRetry(url, needsTor, useTor) { client ->
+            streamFromServer(client, url, hash, call)
         }
     }
 
@@ -549,8 +590,15 @@ class CustomHttpServer(
                     false // Server error mid-stream, return false to try next server
                 }
             }
+        } catch (e: RetryableTimeoutException) {
+            throw e // Nothing was sent to the local client; the retry wrapper decides.
         } catch (e: Exception) {
             MorganiteLog.e(Morganite.TAG, "Network error fetching from $url", e)
+            // Timeouts here happened while connecting/fetching headers, before the
+            // response body started — retryable. Timeouts once streaming has begun
+            // are handled by the catch inside the respondOutputStream block (the
+            // response is already committed and cannot be retried).
+            if (e.isTimeout()) throw RetryableTimeoutException(e)
             false // Connection error, return false to try next server
         }
     }
