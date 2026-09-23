@@ -67,6 +67,23 @@ import java.util.concurrent.atomic.AtomicInteger
 // necessary, which is CPU time (battery) spent per megabyte downloaded.
 private const val COPY_BUFFER_SIZE = 64 * 1024
 
+// Hop-by-hop and framing headers from the upstream response must not be relayed to
+// the local client: Ktor throws UnsafeHeaderException when Transfer-Encoding is
+// appended (the engine owns chunked framing), a relayed Content-Length conflicts
+// with the Transfer-Encoding Ktor adds for respondOutputStream, and the rest are
+// per-hop headers (RFC 9110 §7.6.1) that only apply to the upstream connection.
+private val NON_RELAYED_UPSTREAM_HEADERS = setOf(
+    HttpHeaders.ContentLength,
+    HttpHeaders.TransferEncoding,
+    HttpHeaders.Connection,
+    "Keep-Alive", // no HttpHeaders constant exists in Ktor 3.4.0
+    HttpHeaders.ProxyAuthenticate,
+    HttpHeaders.ProxyAuthorization,
+    HttpHeaders.TE,
+    HttpHeaders.Trailer,
+    HttpHeaders.Upgrade,
+).map { it.lowercase() }.toSet()
+
 // Tor needs far more patience than OkHttp's 10s defaults. For an .onion URL the
 // SOCKS CONNECT only completes after Tor has built a circuit and finished the
 // rendezvous handshake with the hidden service (typically 6 hops total, easily
@@ -441,6 +458,31 @@ class CustomHttpServer(
         }
     }
 
+    // Hashes currently being filled in the background, so a player opening several
+    // ranged connections while probing (moov discovery + seek) doesn't start duplicate
+    // full downloads of the same blob.
+    private val backgroundCacheFills =
+        java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private fun startBackgroundCacheFill(client: OkHttpClient, url: String, hash: String) {
+        if (!backgroundCacheFills.add(hash)) return
+        MorganiteLog.d(Morganite.TAG, "Fetching $hash in the background to fill the cache")
+        Morganite.instance.scope.launch {
+            try {
+                if (!fetchAndSave(client, url, hash)) {
+                    MorganiteLog.d(Morganite.TAG, "Background cache fill failed for $hash")
+                }
+            } catch (e: Exception) {
+                // Must not crash the app scope: fetchAndSave can throw
+                // RetryableTimeoutException on Tor timeouts.
+                // MorganiteLog.d has no throwable overload; w carries the stack trace.
+                MorganiteLog.w(Morganite.TAG, "Background cache fill failed for $hash", e)
+            } finally {
+                backgroundCacheFills.remove(hash)
+            }
+        }
+    }
+
     // Runs on Dispatchers.IO: OkHttp's execute() and the stream copy are blocking,
     // and parking a Ktor CIO event-loop thread on them stalls every other request
     // the server is handling for the duration of the download.
@@ -530,7 +572,11 @@ class CustomHttpServer(
         call: ApplicationCall,
     ): Boolean = withContext(Dispatchers.IO) {
         try {
-            client.newCall(Request.Builder().url(url).build()).execute().use { response ->
+            val requestBuilder = Request.Builder().url(url)
+            // Relay the client's Range request to the upstream server so it can serve
+            // just the requested slice (206) instead of the whole blob.
+            call.request.header(HttpHeaders.Range)?.let { requestBuilder.header(HttpHeaders.Range, it) }
+            client.newCall(requestBuilder.build()).execute().use { response ->
                 if (!response.isSuccessful) {
                     MorganiteLog.d(Morganite.TAG, "Fetch failed from $url: ${response.code}")
                     return@withContext false // Try next server
@@ -540,12 +586,28 @@ class CustomHttpServer(
                 val contentType = response.header("Content-Type")?.let { ContentType.parse(it) }
                     ?: ContentType.Application.OctetStream
 
-                val tempFile = File.createTempFile("download-", ".tmp")
-                val digest = MessageDigest.getInstance("SHA-256")
-
                 response.headers.forEach { (name, value) ->
+                    if (name.lowercase() in NON_RELAYED_UPSTREAM_HEADERS) return@forEach
                     call.response.headers.appendIfAbsent(name, value)
                 }
+
+                val ranged = response.code == 206 // HttpStatusCode.PartialContent
+
+                if (ranged) {
+                    // The body is only a slice, so it cannot be hash-verified or cached. Fill the
+                    // cache with a separate full download that outlives this call: video players
+                    // routinely close this connection right after the first range arrives.
+                    startBackgroundCacheFill(client, url, hash)
+                    call.respondOutputStream(contentType, HttpStatusCode.fromValue(response.code)) {
+                        body.byteStream().use { inputStream ->
+                            inputStream.copyTo(this, COPY_BUFFER_SIZE)
+                        }
+                    }
+                    return@use true
+                }
+
+                val tempFile = File.createTempFile("download-", ".tmp")
+                val digest = MessageDigest.getInstance("SHA-256")
 
                 try {
                     // Ktor streaming; the digest is fed in the same pass so the
