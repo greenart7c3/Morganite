@@ -58,6 +58,7 @@ class MainActivity : ComponentActivity() {
 
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
                     val isRunning by Morganite.instance.httpServer.isRunning.collectAsStateWithLifecycle()
+                    val portInUse by Morganite.instance.httpServer.portInUse.collectAsStateWithLifecycle()
                     val settings by Morganite.instance.settingsManager.settings.collectAsStateWithLifecycle()
                     val logStream by Morganite.instance.logs.collectAsStateWithLifecycle()
 
@@ -123,6 +124,21 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 content = { Text(stringResource(R.string.start)) },
+                            )
+                        }
+
+                        if (portInUse) {
+                            AlertDialog(
+                                onDismissRequest = { Morganite.instance.httpServer.dismissPortInUseError() },
+                                title = { Text(stringResource(R.string.port_in_use_title)) },
+                                text = { Text(stringResource(R.string.port_in_use_message, SERVER_PORT)) },
+                                confirmButton = {
+                                    TextButton(
+                                        onClick = { Morganite.instance.httpServer.dismissPortInUseError() },
+                                    ) {
+                                        Text(stringResource(R.string.cancel))
+                                    }
+                                },
                             )
                         }
 
