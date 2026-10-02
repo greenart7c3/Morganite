@@ -13,4 +13,7 @@
     <string name="clear_storage_confirmation_message">This will delete all stored blobs. This action cannot be undone.</string>
     <string name="confirm">Confirm</string>
     <string name="cancel">Cancel</string>
+    <string name="port_in_use_title">Port in use</string>
+    <string name="port_in_use_message">Port %1$d is already in use by another app. Close the other app using this port and try again.</string>
+    <string name="port_in_use_channel">Server errors</string>
 </resources>
