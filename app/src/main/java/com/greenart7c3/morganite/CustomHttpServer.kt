@@ -1,11 +1,20 @@
 package com.greenart7c3.morganite
 
+import android.Manifest
+import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.app.NotificationChannelCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import com.greenart7c3.morganite.logs.MorganiteLog
+import com.greenart7c3.morganite.MainActivity
 import com.greenart7c3.morganite.models.SettingsManager
 import com.greenart7c3.morganite.service.FileStore
 import com.vitorpamplona.quartz.nip01Core.relay.client.NostrClient
@@ -55,12 +64,22 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.torproject.jni.TorService
 import java.io.File
+import java.net.BindException
 import java.net.InetSocketAddress
 import java.net.Proxy
+import java.net.ServerSocket
 import java.net.SocketTimeoutException
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+
+// Port the local HTTP server listens on. Public so the UI can show it in the
+// "port already in use" dialog.
+const val SERVER_PORT = 24242
+
+// Notification identifiers for the port-in-use error.
+private const val PORT_IN_USE_CHANNEL_ID = "ServerErrorsChannel"
+private const val PORT_IN_USE_NOTIFICATION_ID = 2
 
 // Downloads are copied (and hashed) in chunks of this size. The old 8 KiB buffer
 // meant ~8x more loop iterations, stream syscalls and digest calls per blob than
@@ -135,6 +154,7 @@ class CustomHttpServer(
     val settingsManager: SettingsManager,
 ) {
     val isRunning = MutableStateFlow(value = false)
+    val portInUse = MutableStateFlow(value = false)
     val torStatus = MutableStateFlow(TorService.STATUS_OFF)
 
     lateinit var server: EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration>
@@ -280,6 +300,20 @@ class CustomHttpServer(
     }
 
     suspend fun start() {
+        // Another app (or a leftover socket from a previous run) may already hold
+        // the port: the CIO engine binds from an internal coroutine, so a
+        // BindException there escapes as an unhandled coroutine exception and
+        // kills the process instead of reaching this method's caller. Probing the
+        // port up front lets us fail with a readable message instead.
+        if (isRunning.value) return
+        if (!canBindServerPort()) {
+            portInUse.value = true
+            MorganiteLog.e(Morganite.TAG, "Port $SERVER_PORT is already in use by another app")
+            notifyPortInUse()
+            return
+        }
+        portInUse.value = false
+        NotificationManagerCompat.from(Morganite.instance).cancel(PORT_IN_USE_NOTIFICATION_ID)
         if (::server.isInitialized) {
             MorganiteLog.d(Morganite.TAG, "Server already initialized. Starting")
             server.startSuspend()
@@ -292,6 +326,65 @@ class CustomHttpServer(
         server = startKtorHttpServer()
         startMonitoring()
         server.startSuspend()
+    }
+
+    fun dismissPortInUseError() {
+        portInUse.value = false
+        NotificationManagerCompat.from(Morganite.instance).cancel(PORT_IN_USE_NOTIFICATION_ID)
+    }
+
+    /**
+     * The server can also be started from the background (app startup revives it
+     * through the foreground service), where no dialog is visible — so the
+     * port-in-use error is surfaced as a notification as well. Tapping it opens
+     * the app; it is cancelled once a later start attempt succeeds or the dialog
+     * is dismissed.
+     */
+    private fun notifyPortInUse() {
+        val context = Morganite.instance
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            MorganiteLog.w(Morganite.TAG, "Missing POST_NOTIFICATIONS permission, skipping port-in-use notification")
+            return
+        }
+
+        val notificationManager = NotificationManagerCompat.from(context)
+        val channel = NotificationChannelCompat.Builder(PORT_IN_USE_CHANNEL_ID, NotificationManager.IMPORTANCE_DEFAULT)
+            .setName(context.getString(R.string.port_in_use_channel))
+            .build()
+        notificationManager.createNotificationChannel(channel)
+
+        val intent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+        }
+        val pendingIntent = PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val message = context.getString(R.string.port_in_use_message, SERVER_PORT)
+        val notification = NotificationCompat.Builder(context, PORT_IN_USE_CHANNEL_ID)
+            .setContentTitle(context.getString(R.string.port_in_use_title))
+            .setContentText(message)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(message))
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setContentIntent(pendingIntent)
+            .setAutoCancel(true)
+            .build()
+        notificationManager.notify(PORT_IN_USE_NOTIFICATION_ID, notification)
+    }
+
+    /**
+     * Binds and immediately releases the server port to check whether it is free.
+     * The probe socket uses the JVM defaults (no SO_REUSEADDR), so a successful
+     * bind means the port is actually available for the engine to listen on.
+     */
+    private fun canBindServerPort(): Boolean = try {
+        ServerSocket().use { serverSocket ->
+            serverSocket.bind(InetSocketAddress("0.0.0.0", SERVER_PORT))
+        }
+        true
+    } catch (e: BindException) {
+        MorganiteLog.e(Morganite.TAG, "Cannot bind port $SERVER_PORT: ${e.message}")
+        false
     }
 
     private fun startTor() {
@@ -678,7 +771,7 @@ class CustomHttpServer(
     }
 
     @OptIn(DelicateCoroutinesApi::class, ExperimentalCoroutinesApi::class)
-    private fun startKtorHttpServer(host: String = "0.0.0.0", port: Int = 24242): EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration> {
+    private fun startKtorHttpServer(host: String = "0.0.0.0", port: Int = SERVER_PORT): EmbeddedServer<CIOApplicationEngine, CIOApplicationEngine.Configuration> {
         return embeddedServer(
             CIO,
             port = port,
